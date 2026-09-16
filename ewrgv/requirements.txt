@@ -25,7 +25,7 @@ pytest-cov>=5.0.0
 # ============================================================
 
 # LLM providers
-# openai>=1.30.0
+openai>=1.30.0
 
 # Embedding / retrieval
 # sentence-transformers>=3.0.0

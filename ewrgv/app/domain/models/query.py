@@ -4,8 +4,13 @@ app/domain/models/query.py
 Domain model for a research query submitted to the EWRGV pipeline.
 
 ResearchQuery is created at the entry point of the pipeline and is
-progressively enriched as query-understanding and query-expansion run.
-It is intentionally kept free of any infrastructure concerns.
+progressively enriched as the pipeline advances:
+  - query_type and understanding are populated by Phase 2.1
+    (QueryUnderstandingService).
+  - expanded_queries are produced by the same service.
+  - Later phases attach paper and retrieval results via other models.
+
+The model is intentionally kept free of any infrastructure concerns.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.enums import QueryType
+from app.domain.models.query_understanding import QueryUnderstanding
 
 
 class ResearchQuery(BaseModel):
@@ -42,6 +48,7 @@ class ResearchQuery(BaseModel):
     query_id: str = Field(default_factory=lambda: str(uuid4()))
     query: str
     query_type: QueryType = QueryType.UNKNOWN
+    understanding: Optional[QueryUnderstanding] = None
     expanded_queries: list[str] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)
 

@@ -50,11 +50,19 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # LLM Provider
     # ------------------------------------------------------------------ #
-    LLM_PROVIDER: str = "openai"          # e.g. "openai", "anthropic", "local"
-    LLM_MODEL: str = "gpt-4o"
+    LLM_PROVIDER: str = "openrouter"      # "openrouter" | "openai" | "grok" | "anthropic" | "local"
+    LLM_MODEL: str = "openai/gpt-4o-mini" # e.g. "openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "google/gemini-2.0-flash-001"
     LLM_API_KEY: str = Field(default="", repr=False)
+    OPENROUTER_API_KEY: str = Field(default="", repr=False)
+    LLM_BASE_URL: str | None = None        # Custom endpoint override (defaults to https://openrouter.ai/api/v1 for openrouter)
     LLM_TEMPERATURE: float = 0.0
     LLM_MAX_TOKENS: int = 4096
+    LLM_TIMEOUT: int = 30                  # HTTP request timeout in seconds
+
+    # ------------------------------------------------------------------ #
+    # Query Understanding & Expansion (Phase 2.1)
+    # ------------------------------------------------------------------ #
+    QUERY_EXPANSION_MAX_QUERIES: int = 8   # Cap on generated expanded queries
 
     # ------------------------------------------------------------------ #
     # Embeddings
@@ -76,10 +84,25 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./data/artifacts/ewrgv.db"
 
     # ------------------------------------------------------------------ #
-    # Literature Search Provider
+    # Literature Collection (Phase 2.2)
     # ------------------------------------------------------------------ #
-    SEARCH_PROVIDER: str = "semantic_scholar"   # "semantic_scholar" | "openalex"
-    SEARCH_API_KEY: str = Field(default="", repr=False)
+
+    # Comma-separated list of enabled providers: "semantic_scholar", "openalex"
+    LITERATURE_PROVIDERS: str = "semantic_scholar,openalex"
+
+    # Semantic Scholar
+    SEMANTIC_SCHOLAR_API_KEY: str = Field(default="", repr=False)   # optional; anonymous OK
+    SEMANTIC_SCHOLAR_BASE_URL: str = "https://api.semanticscholar.org/graph/v1"
+    SEMANTIC_SCHOLAR_MAX_RESULTS: int = 20   # results per query
+
+    # OpenAlex
+    OPENALEX_BASE_URL: str = "https://api.openalex.org"
+    OPENALEX_EMAIL: str = Field(default="", repr=False)   # optional polite-pool address
+    OPENALEX_MAX_RESULTS: int = 20   # results per query
+
+    # Overall collection limits
+    LITERATURE_REQUEST_TIMEOUT: int = 30    # HTTP timeout in seconds
+    LITERATURE_MAX_TOTAL_RESULTS: int = 200  # hard cap across all queries + providers
 
     # ------------------------------------------------------------------ #
     # Retrieval

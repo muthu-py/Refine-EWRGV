@@ -1,0 +1,179 @@
+# Phase 2.1: Query Understanding & Expansion — Implementation Report
+
+## Test Results
+
+```
+Existing Phase 1 tests:  25/25  ✅
+New Phase 2.1 tests:     69/69  ✅
+─────────────────────────────────────
+Total:                   94/94  ✅  (1.22s)
+```
+
+---
+
+## Files Created
+
+| File | Purpose |
+|---|---|
+| [`app/domain/models/query_understanding.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/app/domain/models/query_understanding.py) | `QueryUnderstanding` domain model — pure Pydantic, no infra |
+| [`app/query_understanding/__init__.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/app/query_understanding/__init__.py) | Package init, exports `QueryUnderstandingService` |
+| [`app/query_understanding/prompts.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/app/query_understanding/prompts.py) | `build_query_understanding_prompt()` — pure function, no side effects |
+| [`app/query_understanding/schemas.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/app/query_understanding/schemas.py) | `QueryUnderstandingLLMOutput` — LLM transport schema + `json_schema_for_llm()` |
+| [`app/query_understanding/service.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/app/query_understanding/service.py) | `QueryUnderstandingService` — core business logic |
+| [`tests/unit/test_query_understanding_schemas.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/tests/unit/test_query_understanding_schemas.py) | Schema and domain model tests (11 tests) |
+| [`tests/unit/test_query_understanding_service.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/tests/unit/test_query_understanding_service.py) | Service tests — valid, failure, cap, edge cases (44 tests) |
+| [`tests/unit/test_query_understanding_prompts.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/tests/unit/test_query_understanding_prompts.py) | Prompt template tests (14 tests) |
+| [`docs/query_understanding.md`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/docs/query_understanding.md) | Module documentation |
+
+---
+
+## Files Modified
+
+| File | Why |
+|---|---|
+| [`app/domain/models/query.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/app/domain/models/query.py) | Added `understanding: Optional[QueryUnderstanding] = None` field to `ResearchQuery` |
+| [`app/domain/models/__init__.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/app/domain/models/__init__.py) | Exported `QueryUnderstanding` |
+| [`app/providers/llm/openai_provider.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/app/providers/llm/openai_provider.py) | Fully implemented `complete()` and `complete_structured()` with JSON mode, timeout, and error wrapping |
+| [`app/core/config.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/app/core/config.py) | Added `LLM_TIMEOUT` and `QUERY_EXPANSION_MAX_QUERIES` settings |
+| [`app/orchestration/research_pipeline.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/app/orchestration/research_pipeline.py) | Added `query_understanding_service` dependency; implemented Stage 1 with failure handling |
+| [`app/api/routes/research.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/app/api/routes/research.py) | Extended `POST /query` to call `QueryUnderstandingService`; richer response with `understanding` + `expanded_queries`; graceful stub mode when no API key |
+| [`requirements.txt`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/requirements.txt) | Activated `openai>=1.30.0` |
+| [`.env.example`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/.env.example) | Documented `LLM_TIMEOUT` and `QUERY_EXPANSION_MAX_QUERIES` |
+| [`tests/unit/test_pipeline.py`](file:///c:/Users/Muthu/Downloads/Refine-ResearchGap/ewrgv/tests/unit/test_pipeline.py) | Updated for new `query_understanding_service` constructor arg; added Stage 1 tests |
+
+---
+
+## Architecture Changes
+
+The new module integrates cleanly into the existing architecture without replacing any existing abstractions:
+
+```
+POST /api/v1/research/query
+         │
+         ▼
+  QueryUnderstandingService          app/query_understanding/service.py
+         │  depends on (protocol only)
+         ▼
+  LLMProvider                        app/domain/interfaces.py
+         │
+         ▼
+  OpenAILLMProvider                  app/providers/llm/openai_provider.py
+         │  returns raw dict
+         ▼
+  QueryUnderstandingLLMOutput        app/query_understanding/schemas.py
+  (Pydantic validation)
+         │  maps to domain
+         ▼
+  QueryUnderstanding                 app/domain/models/query_understanding.py
+         │  attached to
+         ▼
+  ResearchQuery.understanding        app/domain/models/query.py
+         │  + expanded_queries[]
+         ▼
+  ResearchPipeline (Stage 1)         app/orchestration/research_pipeline.py
+```
+
+**Key design decisions:**
+- `QueryUnderstandingLLMOutput` (LLM schema) and `QueryUnderstanding` (domain model) are **intentionally separate** — the LLM contract can evolve without touching the domain.
+- The service depends on the `LLMProvider` **protocol** only — swapping to Gemini/Anthropic requires zero changes to business logic.
+- `ResearchQuery` is returned as an immutable copy (`model_copy`) — the original is never mutated.
+- The pipeline fails **gracefully** on `ProviderError` — returning a `FAILED` result rather than raising.
+
+---
+
+## LLM Output Schema
+
+```json
+{
+  "domain":               "string | null",
+  "problem":              "string | null",
+  "task":                 "string | null",
+  "methods":              ["string", "..."],
+  "concepts":             ["string", "..."],
+  "entities":             ["string", "..."],
+  "datasets":             ["string", "..."],
+  "metrics":              ["string", "..."],
+  "constraints":          ["string", "..."],
+  "research_intent":      "string | null",
+  "terminology_variants": ["string", "..."],
+  "method_variants":      ["string", "..."],
+  "expanded_queries":     ["string", "..."]
+}
+```
+
+---
+
+## New Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_TIMEOUT` | `30` | HTTP timeout in seconds for LLM API calls |
+| `QUERY_EXPANSION_MAX_QUERIES` | `8` | Maximum expanded queries to return |
+
+All other LLM settings (`LLM_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_PROVIDER`) were pre-existing.
+
+---
+
+## Manual Verification Example
+
+> **Raw question:** "How are graph neural networks being used for detecting CAN bus attacks in autonomous vehicles?"
+
+**Expected structured understanding (from a real LLM call):**
+
+```json
+{
+  "domain": "Automotive Cybersecurity",
+  "problem": "CAN bus attack detection in autonomous vehicles",
+  "task": "intrusion detection",
+  "methods": ["Graph Neural Networks"],
+  "concepts": ["CAN bus", "autonomous vehicles", "in-vehicle network security"],
+  "entities": [],
+  "datasets": [],
+  "metrics": [],
+  "constraints": ["automotive domain"],
+  "research_intent": "method exploration",
+  "terminology_variants": ["Controller Area Network", "CAN protocol", "vehicular network"],
+  "method_variants": ["GNN", "GCN", "graph convolutional network", "graph attention network"],
+  "expanded_queries": [
+    "graph neural networks CAN bus attack detection",
+    "GNN automotive intrusion detection",
+    "graph-based CAN intrusion detection",
+    "graph neural networks in-vehicle network security",
+    "GNN autonomous vehicle cybersecurity",
+    "Controller Area Network anomaly detection deep learning",
+    "automotive network intrusion detection machine learning"
+  ]
+}
+```
+
+**API response shape from `POST /api/v1/research/query`:**
+```json
+{
+  "job_id": "...",
+  "query_id": "...",
+  "status": "understood",
+  "message": "Query understanding complete. 7 expanded queries generated.",
+  "query_type": "Unknown",
+  "understanding": { "..." },
+  "expanded_queries": ["...", "..."]
+}
+```
+
+---
+
+## Acceptance Criteria Verification
+
+| # | Criterion | Status |
+|---|---|---|
+| 1 | Raw research question can be submitted | ✅ |
+| 2 | QU module sends it to configured LLM provider | ✅ |
+| 3 | LLM returns validated structured information | ✅ |
+| 4 | Expanded search queries are generated | ✅ |
+| 5 | Original raw query is preserved | ✅ (tested) |
+| 6 | Result maps cleanly into existing domain model | ✅ |
+| 7 | Invalid LLM output handled safely | ✅ (tested) |
+| 8 | Provider failures handled via existing exceptions | ✅ (`ProviderError`) |
+| 9 | Configuration is environment-based | ✅ |
+| 10 | Tests cover success and failure | ✅ 94/94 |
+| 11 | All Phase 1 tests still pass | ✅ |
+| 12 | No future Phase 2 components prematurely implemented | ✅ |
