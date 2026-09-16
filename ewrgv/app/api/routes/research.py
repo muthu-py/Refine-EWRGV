@@ -29,8 +29,11 @@ from __future__ import annotations
 from typing import Any, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/research", tags=["Research"])
 
@@ -122,11 +125,25 @@ class CollectPaperResponse(BaseModel):
 class CollectResponse(BaseModel):
     """Response from POST /research/collect."""
     status: str
+    run_id: str = ""
     queries_searched: list[str] = []
     providers_used: list[str] = []
     total_results: int = 0
     papers: list[CollectPaperResponse] = []
     provider_errors: list[dict] = []
+
+
+class AcquireRequest(BaseModel):
+    """Request body for POST /research/acquire."""
+    run_id: str
+
+
+class AcquireResponse(BaseModel):
+    """Response from POST /research/acquire."""
+    job_id: str
+    run_id: str
+    status: str
+    message: str
 
 
 class GapsRequest(BaseModel):
@@ -334,6 +351,26 @@ async def collect_literature(request: CollectRequest) -> CollectResponse:
     )
     result = service.collect(rq)
 
+    # Persist the collected papers
+    try:
+        from app.storage.relational.database import get_db_pool
+        from app.storage.repositories.paper_repository import PaperRepository
+        
+        pool = await get_db_pool()
+        repo = PaperRepository(pool)
+        await repo.save_collection_result(result, request.query)
+        
+        # Run deduplication on the corpus
+        from app.ingestion.deduplication.service import Deduplicator  # noqa: PLC0415
+        deduplicator = Deduplicator(pool)
+        stats = await deduplicator.run()
+        logger.info("Deduplication after collection", extra=stats)
+    except Exception as exc:
+        logger.error(
+            "Failed to persist collection result to Supabase",
+            extra={"error": str(exc), "query_id": rq.query_id}
+        )
+
     papers_resp = []
     for cp in result.papers:
         papers_resp.append(CollectPaperResponse(
@@ -350,11 +387,55 @@ async def collect_literature(request: CollectRequest) -> CollectResponse:
 
     return CollectResponse(
         status=result.status,
+        run_id=rq.query_id,
         queries_searched=result.queries_searched,
         providers_used=result.providers_used,
         total_results=result.total_collected,
         papers=papers_resp,
         provider_errors=result.provider_errors,
+    )
+
+
+@router.post("/acquire", response_model=AcquireResponse, summary="Start full-text acquisition")
+async def start_acquisition(request: AcquireRequest, req: Request) -> AcquireResponse:
+    """
+    Start asynchronous full-text (PDF) acquisition for all papers in a
+    research run that have not yet been processed.
+
+    Returns immediately with a `job_id` that can be polled via
+    `GET /api/v1/research/{job_id}`.
+    """
+    import asyncio  # noqa: PLC0415
+    from app.storage.relational.database import get_db_pool  # noqa: PLC0415
+    from app.storage.repositories.paper_repository import PaperRepository  # noqa: PLC0415
+    from app.ingestion.acquisition.worker import run_acquisition  # noqa: PLC0415
+
+    pool = await get_db_pool()
+    repo = PaperRepository(pool)
+
+    # Validate run_id exists
+    if not await repo.run_exists(request.run_id):
+        from fastapi import HTTPException  # noqa: PLC0415
+        raise HTTPException(status_code=404, detail=f"run_id '{request.run_id}' not found.")
+
+    job_store = req.app.state.job_store
+    job = await job_store.create_job(request.run_id)
+
+    # Fire-and-forget — returns immediately
+    asyncio.create_task(
+        run_acquisition(job=job, job_store=job_store, repo=repo)
+    )
+
+    logger.info(
+        "Acquisition job created",
+        extra={"job_id": job.job_id, "run_id": request.run_id},
+    )
+
+    return AcquireResponse(
+        job_id=job.job_id,
+        run_id=request.run_id,
+        status=job.status.value,
+        message=f"Acquisition job started. Poll GET /api/v1/research/{job.job_id} for progress.",
     )
 
 
@@ -393,16 +474,35 @@ async def trigger_validation(request: ValidateRequest) -> ValidateResponse:
 @router.get(
     "/{job_id}",
     response_model=JobStatusResponse,
-    summary="Get research job status",
+    summary="Get acquisition job status",
 )
-async def get_job_status(job_id: str) -> JobStatusResponse:
+async def get_job_status(job_id: str, req: Request) -> JobStatusResponse:
     """
-    Retrieve the current status and results of a research pipeline job.
+    Retrieve the current status and progress of an acquisition job.
 
-    **NOT YET IMPLEMENTED** – returns placeholder status.
+    Returns real-time stats: acquired, failed, no_oa counts, and
+    completion timestamp once the job finishes.
     """
+    job_store = getattr(req.app.state, "job_store", None)
+    if job_store is None:
+        return JobStatusResponse(
+            job_id=job_id,
+            stage="not_found",
+            status="No acquisition job found for this job_id.",
+        )
+
+    job = await job_store.get_job(job_id)
+
+    if job is None:
+        return JobStatusResponse(
+            job_id=job_id,
+            stage="not_found",
+            status="No acquisition job found for this job_id.",
+        )
+
     return JobStatusResponse(
-        job_id=job_id,
-        stage="not_implemented",
-        status="Pipeline not yet implemented.",
+        job_id=job.job_id,
+        stage="acquisition",
+        status=job.status.value,
+        result_summary=job.to_dict(),
     )

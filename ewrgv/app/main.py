@@ -49,6 +49,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting %s v%s", settings.APP_NAME, settings.APP_VERSION)
     logger.info("Debug mode: %s", settings.DEBUG)
 
+    # Mount the in-memory job store for background acquisition tracking
+    from app.core.job_store import JobStore  # noqa: PLC0415
+    app.state.job_store = JobStore()
+
     yield  # Application runs here
 
     logger.info("Shutting down %s", settings.APP_NAME)

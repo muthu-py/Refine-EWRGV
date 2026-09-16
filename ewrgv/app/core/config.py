@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     # Relational / Metadata Store
     # ------------------------------------------------------------------ #
     DATABASE_URL: str = "sqlite:///./data/artifacts/ewrgv.db"
+    SUPABASE_DATABASE_URL: str = Field(default="", repr=False)
+    SUPABASE_URL: str = Field(default="", repr=False)
+    SUPABASE_SERVICE_ROLE_KEY: str = Field(default="", repr=False)
+    SUPABASE_STORAGE_BUCKET: str = "papers"
 
     # ------------------------------------------------------------------ #
     # Literature Collection (Phase 2.2)
@@ -99,6 +103,10 @@ class Settings(BaseSettings):
     OPENALEX_BASE_URL: str = "https://api.openalex.org"
     OPENALEX_EMAIL: str = Field(default="", repr=False)   # optional polite-pool address
     OPENALEX_MAX_RESULTS: int = 20   # results per query
+
+    # Unpaywall
+    UNPAYWALL_BASE_URL: str = "https://api.unpaywall.org/v2"
+    UNPAYWALL_EMAIL: str = Field(default="", repr=False)
 
     # Overall collection limits
     LITERATURE_REQUEST_TIMEOUT: int = 30    # HTTP timeout in seconds
