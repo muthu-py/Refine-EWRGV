@@ -2,6 +2,10 @@
 app/ingestion/acquisition/fulltext.py
 -------------------------------------
 Downloads full-text PDFs and uploads them to Supabase Storage.
+
+Phase 2.8: Uses artifact_paths.get_fulltext_path() for all path construction.
+The stored path in the DB is bucket-relative (papers/{paper_id}/fulltext.pdf),
+NOT prefixed with the bucket name again.
 """
 
 import httpx
@@ -9,6 +13,7 @@ from typing import Optional, Dict, Any
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.storage.artifact_paths import ARTIFACT_BUCKET, get_fulltext_path
 
 logger = get_logger(__name__)
 
@@ -19,7 +24,7 @@ class FullTextAcquisitionService:
     def __init__(self):
         self._supabase_url = settings.SUPABASE_URL.rstrip('/') if settings.SUPABASE_URL else ""
         self._supabase_key = settings.SUPABASE_SERVICE_ROLE_KEY
-        self._bucket = settings.SUPABASE_STORAGE_BUCKET
+        self._bucket = ARTIFACT_BUCKET
         self._client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
         self._max_file_size = 20 * 1024 * 1024  # 20 MB max
 
@@ -66,7 +71,9 @@ class FullTextAcquisitionService:
                     return {"status": "DOWNLOAD_FAILED", "storage_path": None, "content_type": content_type, "file_size": file_size}
 
                 # 2. Upload to Supabase Storage REST API
-                storage_path = f"papers/{paper_id}/fulltext.pdf"
+                # get_fulltext_path returns bucket-relative path: papers/{paper_id}/fulltext.pdf
+                # The upload URL places the bucket name in the URL path separately.
+                storage_path = get_fulltext_path(paper_id)
                 upload_url = f"{self._supabase_url}/storage/v1/object/{self._bucket}/{storage_path}"
                 
                 upload_headers = {
@@ -88,9 +95,12 @@ class FullTextAcquisitionService:
                     )
                     return {"status": "DOWNLOAD_FAILED", "storage_path": None, "content_type": content_type, "file_size": file_size}
 
+                # Return bucket-relative path only (NOT bucket/path).
+                # DB stores:  papers/{paper_id}/fulltext.pdf
+                # NOT:        papers/papers/{paper_id}/fulltext.pdf  (old bug)
                 return {
                     "status": "DOWNLOADED",
-                    "storage_path": f"{self._bucket}/{storage_path}",
+                    "storage_path": storage_path,
                     "content_type": "application/pdf",
                     "file_size": file_size
                 }

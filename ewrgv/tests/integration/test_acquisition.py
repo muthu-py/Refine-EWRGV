@@ -119,7 +119,10 @@ async def test_fulltext_acquisition_success(mock_httpx_client, monkeypatch):
     stats = await service.acquire("p123", "https://pdf.url")
     
     assert stats["status"] == "DOWNLOADED"
-    assert stats["storage_path"] == f"{settings.SUPABASE_STORAGE_BUCKET}/papers/p123/fulltext.pdf"
+    # Phase 2.8: storage_path is bucket-relative only — no double bucket prefix.
+    # Correct: papers/p123/fulltext.pdf
+    # Bug (old):  papers/papers/p123/fulltext.pdf  ← was caused by fulltext.py returning bucket+path
+    assert stats["storage_path"] == f"papers/p123/fulltext.pdf"
     assert stats["content_type"] == "application/pdf"
     assert stats["file_size"] == 16
     

@@ -1,5 +1,6 @@
-"""
+﻿"""
 app/ingestion/chunking/__init__.py
-------------------------------------
-Text chunking strategies (fixed-size, sentence-boundary, semantic, etc.).
+-----------------------------------
+Chunking package for Phase 2.7.
 """
+

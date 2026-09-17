@@ -61,14 +61,36 @@ class LLMProvider(Protocol):
 
 @runtime_checkable
 class EmbeddingProvider(Protocol):
-    """Interface for text embedding models."""
+    """
+    Interface for text embedding models.
+
+    Phase 2.9 adds async variants (embed_text, embed_documents) and
+    metadata accessors (get_model_name, get_dimension).  The original
+    sync methods are preserved for backward compatibility.
+    """
 
     def embed(self, text: str) -> list[float]:
-        """Return a dense vector embedding for a single text string."""
+        """Return a dense vector embedding for a single text string (sync)."""
         ...
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Return embeddings for a batch of texts."""
+        """Return embeddings for a batch of texts (sync)."""
+        ...
+
+    async def embed_text(self, text: str) -> list[float]:
+        """Return a dense vector embedding for a single text string (async)."""
+        ...
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """Return embeddings for a batch of texts (async)."""
+        ...
+
+    def get_model_name(self) -> str:
+        """Return the model identifier used by this provider."""
+        ...
+
+    def get_dimension(self) -> int:
+        """Return the embedding vector dimension."""
         ...
 
 

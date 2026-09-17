@@ -32,8 +32,18 @@ dependencies = [
     # HTTP client (for literature collectors)
     "httpx>=0.27.0",
 
+    # Document parsing (Phase 2.5)
+    "PyMuPDF>=1.24.0",
+
     # Typing backports
     "typing-extensions>=4.11.0",
+
+    # Database
+    "asyncpg>=0.29.0",
+    "pgvector>=0.3.0",
+
+    # Retrieval
+    "rank-bm25>=0.2.2",
 ]
 
 [project.optional-dependencies]

@@ -111,3 +111,82 @@ class PipelineStage(str, Enum):
     EXPLANATION = "explanation"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+# ------------------------------------------------------------------ #
+# Section Extraction (Phase 2.6)
+# ------------------------------------------------------------------ #
+
+
+class SectionType(str, Enum):
+    """
+    Controlled vocabulary for semantic section types in academic papers.
+
+    Design notes
+    ------------
+    * NOT every paper will contain all section types. Missing sections are normal.
+    * Combined headings (e.g. "Results and Discussion") use the closest type.
+    * Original title is always preserved. This enum classifies, never renames.
+    """
+    ABSTRACT = "ABSTRACT"
+    INTRODUCTION = "INTRODUCTION"
+    BACKGROUND = "BACKGROUND"
+    RELATED_WORK = "RELATED_WORK"
+    LITERATURE_REVIEW = "LITERATURE_REVIEW"
+    METHODOLOGY = "METHODOLOGY"
+    METHODS = "METHODS"
+    DATASET = "DATASET"
+    DATA = "DATA"
+    MODEL = "MODEL"
+    SYSTEM_DESIGN = "SYSTEM_DESIGN"
+    IMPLEMENTATION = "IMPLEMENTATION"
+    EXPERIMENTS = "EXPERIMENTS"
+    EXPERIMENTAL_SETUP = "EXPERIMENTAL_SETUP"
+    RESULTS = "RESULTS"
+    EVALUATION = "EVALUATION"
+    DISCUSSION = "DISCUSSION"
+    LIMITATIONS = "LIMITATIONS"
+    FUTURE_WORK = "FUTURE_WORK"
+    CONCLUSION = "CONCLUSION"
+    REFERENCES = "REFERENCES"
+    ACKNOWLEDGMENTS = "ACKNOWLEDGMENTS"
+    APPENDIX = "APPENDIX"
+    OTHER = "OTHER"
+    UNKNOWN = "UNKNOWN"
+
+
+class SectionStatus(str, Enum):
+    """
+    Pipeline status for the section-extraction step (Phase 2.6).
+
+    Kept separate from full_text_status (Phase 2.4) and parsing_status (Phase 2.5).
+    """
+    NOT_EXTRACTED = "NOT_EXTRACTED"
+    EXTRACTED = "EXTRACTED"
+    EXTRACTION_FAILED = "EXTRACTION_FAILED"
+
+
+class ChunkStatus(str, Enum):
+    """
+    Pipeline status for the chunking step (Phase 2.7).
+
+    Kept separate from parsing_status (Phase 2.5) and section_status (Phase 2.6).
+    """
+    NOT_CHUNKED = "NOT_CHUNKED"
+    CHUNKED = "CHUNKED"
+    CHUNKING_FAILED = "CHUNKING_FAILED"
+
+
+class EmbeddingStatus(str, Enum):
+    """
+    Pipeline status for the embedding step (Phase 2.9).
+
+    Tracks the embedding state of a paper's chunks.  A paper may be
+    PARTIAL when some (but not all) chunks have been successfully embedded.
+    """
+    NOT_EMBEDDED = "NOT_EMBEDDED"
+    EMBEDDING_IN_PROGRESS = "EMBEDDING_IN_PROGRESS"
+    EMBEDDED = "EMBEDDED"
+    EMBEDDING_FAILED = "EMBEDDING_FAILED"
+    PARTIAL = "PARTIAL"
+

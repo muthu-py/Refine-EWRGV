@@ -71,6 +71,15 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_API_KEY: str = Field(default="", repr=False)
     EMBEDDING_DIMENSION: int = 1536
+    EMBEDDING_BATCH_SIZE: int = 32        # chunks per API request
+    EMBEDDING_TIMEOUT: int = 60           # HTTP request timeout in seconds
+    EMBEDDING_RETRY_COUNT: int = 3        # max retries on transient failures
+    EMBEDDING_RETRY_DELAY: float = 1.0    # base delay in seconds between retries
+
+    # ------------------------------------------------------------------ #
+    # BM25 (Phase 2.9)
+    # ------------------------------------------------------------------ #
+    BM25_INDEX_PATH: str = "data/artifacts/bm25"
 
     # ------------------------------------------------------------------ #
     # Vector Store
@@ -111,6 +120,16 @@ class Settings(BaseSettings):
     # Overall collection limits
     LITERATURE_REQUEST_TIMEOUT: int = 30    # HTTP timeout in seconds
     LITERATURE_MAX_TOTAL_RESULTS: int = 200  # hard cap across all queries + providers
+
+    # ------------------------------------------------------------------ #
+    # Chunking (Phase 2.7)
+    # ------------------------------------------------------------------ #
+    # Sizes are in approximate tokens (characters // 4).
+    # These are initial reasonable defaults and should be tuned empirically.
+    CHUNK_TARGET_SIZE: int = 500    # preferred tokens per chunk
+    CHUNK_MAX_SIZE: int = 600       # hard upper bound tokens per chunk
+    CHUNK_OVERLAP: int = 75         # overlap tokens between consecutive chunks
+    CHUNK_MIN_SIZE: int = 20        # minimum tokens to emit a chunk
 
     # ------------------------------------------------------------------ #
     # Retrieval
