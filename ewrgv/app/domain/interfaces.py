@@ -323,3 +323,83 @@ class EvidenceRepository(ABC):
 
     @abstractmethod
     def delete(self, evidence_id: str) -> None: ...
+
+
+# ======================================================================
+# Corpus Storage Interface (Phase 2.5)
+# ======================================================================
+
+
+@runtime_checkable
+class CorpusStore(Protocol):
+    """
+    Interface for accessing the document corpus (papers and chunks).
+
+    Retrieval modules depend on this interface to access document chunks
+    for scoring and ranking.  The concrete implementation may be an
+    in-memory stub (development), a database-backed store (production),
+    or a combination.
+
+    Current implementation: StubCorpusStore (app.stubs.stub_corpus).
+    """
+
+    def get_all_chunks(self) -> list[DocumentChunk]:
+        """Return all document chunks in the corpus."""
+        ...
+
+    def get_chunks_by_paper_id(self, paper_id: str) -> list[DocumentChunk]:
+        """Return all chunks belonging to a specific paper."""
+        ...
+
+    def get_paper_by_id(self, paper_id: str) -> Optional[Paper]:
+        """Return a paper by its ID, or None if not found."""
+        ...
+
+    def get_all_papers(self) -> list[Paper]:
+        """Return all papers in the corpus."""
+        ...
+
+
+# ======================================================================
+# Knowledge Graph Interface (Phase 2.5)
+# ======================================================================
+
+
+@runtime_checkable
+class KnowledgeGraphStore(Protocol):
+    """
+    Interface for querying the knowledge graph of academic concepts.
+
+    The KG maps entities/concepts to relationships and to papers/chunks.
+    Retrieval modules use this to perform concept-based retrieval.
+
+    Current implementation: StubKnowledgeGraphStore (app.stubs.stub_knowledge_graph).
+    """
+
+    def find_entities(self, query: str) -> list[dict]:
+        """
+        Find entities/concepts matching the query string.
+
+        Returns a list of entity dicts, each containing at minimum:
+            ``{"entity_id": str, "name": str, "entity_type": str}``
+        """
+        ...
+
+    def get_related_entities(self, entity_id: str) -> list[dict]:
+        """
+        Get entities related to the given entity via KG edges.
+
+        Returns a list of relationship dicts, each containing at minimum:
+            ``{"source_id": str, "target_id": str, "target_name": str,
+              "relation": str}``
+        """
+        ...
+
+    def get_entity_chunks(self, entity_id: str) -> list[str]:
+        """
+        Get chunk IDs associated with a given entity.
+
+        Returns a list of chunk_id strings.
+        """
+        ...
+

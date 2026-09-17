@@ -17,6 +17,7 @@ from app.domain.models.collection import (
     CollectedPaper,
     CollectionResult,
 )
+from app.domain.models.retrieval_result import RetrievalResult
 
 __all__ = [
     "Author",
@@ -32,4 +33,6 @@ __all__ = [
     "PaperProvenance",
     "CollectedPaper",
     "CollectionResult",
+    # Phase 2.5 — Retrieval
+    "RetrievalResult",
 ]

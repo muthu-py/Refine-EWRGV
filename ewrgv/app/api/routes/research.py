@@ -5,11 +5,17 @@ Research workflow endpoints for the EWRGV API.
 
 Endpoints
 ---------
-POST /api/v1/research/query     – Submit a research question; returns
-                                   structured understanding + expanded queries
-POST /api/v1/research/gaps      – Trigger gap detection for a query
-POST /api/v1/research/validate  – Trigger EWRGV validation for a gap
-GET  /api/v1/research/{job_id}  – Get status/results of a research job
+POST /api/v1/research/query               – Submit a research question; returns
+                                             structured understanding + expanded queries
+POST /api/v1/research/collect             – Search academic literature
+POST /api/v1/research/acquire             – Start full-text acquisition
+POST /api/v1/research/retrieve/dense      – Dense (semantic) retrieval
+POST /api/v1/research/retrieve/sparse     – Sparse (BM25) retrieval
+POST /api/v1/research/retrieve/knowledge-graph – Knowledge Graph retrieval
+POST /api/v1/research/retrieve/hybrid     – Hybrid (RRF fusion) retrieval
+POST /api/v1/research/gaps               – Trigger gap detection for a query
+POST /api/v1/research/validate           – Trigger EWRGV validation for a gap
+GET  /api/v1/research/{job_id}           – Get status/results of a research job
 
 Design notes
 ------------
@@ -165,6 +171,32 @@ class ValidateResponse(BaseModel):
     job_id: str
     status: str
     validation_results: list[dict]
+
+
+class RetrieveRequest(BaseModel):
+    """Request body for POST /research/retrieve/* endpoints."""
+    query: str
+    top_k: int = 10
+
+
+class RetrieveResultItem(BaseModel):
+    """Single result in the retrieval response."""
+    chunk_id: str
+    paper_id: str
+    section: str = ""
+    text: str = ""
+    score: float = 0.0
+    rank: int = 0
+    retrieval_method: str = ""
+    metadata: dict = {}
+
+
+class RetrieveResponse(BaseModel):
+    """Response from POST /research/retrieve/* endpoints."""
+    query: str
+    top_k: int
+    total_results: int
+    results: list[RetrieveResultItem]
 
 
 class JobStatusResponse(BaseModel):
@@ -437,6 +469,132 @@ async def start_acquisition(request: AcquireRequest, req: Request) -> AcquireRes
         status=job.status.value,
         message=f"Acquisition job started. Poll GET /api/v1/research/{job.job_id} for progress.",
     )
+
+
+def _build_retrieve_response(
+    query: str, top_k: int, results: list,
+) -> RetrieveResponse:
+    """Map domain RetrievalResult list to the API response schema."""
+    return RetrieveResponse(
+        query=query,
+        top_k=top_k,
+        total_results=len(results),
+        results=[
+            RetrieveResultItem(
+                chunk_id=r.chunk_id,
+                paper_id=r.paper_id,
+                section=r.section,
+                text=r.text,
+                score=r.score,
+                rank=r.rank,
+                retrieval_method=r.retrieval_method,
+                metadata=r.metadata,
+            )
+            for r in results
+        ],
+    )
+
+
+def _validate_retrieve_request(request: RetrieveRequest) -> None:
+    """Shared validation for all retrieve endpoints."""
+    from app.core.exceptions import BadRequestError  # noqa: PLC0415
+
+    if not request.query or not request.query.strip():
+        raise BadRequestError("Query must be a non-empty string.")
+    if not isinstance(request.top_k, int) or request.top_k < 1 or request.top_k > 100:
+        raise BadRequestError("top_k must be an integer between 1 and 100.")
+
+
+@router.post(
+    "/retrieve/dense",
+    response_model=RetrieveResponse,
+    summary="Dense (semantic) retrieval",
+)
+async def retrieve_dense(request: RetrieveRequest) -> RetrieveResponse:
+    """
+    Run semantic dense retrieval using vector similarity.
+
+    Embeds the query into a dense vector and computes cosine similarity
+    against all corpus chunk embeddings.  Returns the top-k most similar
+    chunks.
+
+    Only the DenseRetriever is invoked.
+    """
+    from app.retrieval.service import RetrievalService  # noqa: PLC0415
+
+    _validate_retrieve_request(request)
+    service = RetrievalService()
+    results = service.retrieve(query=request.query, top_k=request.top_k, method="dense")
+    return _build_retrieve_response(request.query, request.top_k, results)
+
+
+@router.post(
+    "/retrieve/sparse",
+    response_model=RetrieveResponse,
+    summary="Sparse (BM25) retrieval",
+)
+async def retrieve_sparse(request: RetrieveRequest) -> RetrieveResponse:
+    """
+    Run lexical retrieval using BM25 keyword matching.
+
+    Tokenises the query and scores each corpus chunk using the BM25 Okapi
+    formula (k1=1.5, b=0.75).  Returns the top-k highest-scoring chunks.
+
+    Only the SparseRetriever is invoked.
+    """
+    from app.retrieval.service import RetrievalService  # noqa: PLC0415
+
+    _validate_retrieve_request(request)
+    service = RetrievalService()
+    results = service.retrieve(query=request.query, top_k=request.top_k, method="sparse")
+    return _build_retrieve_response(request.query, request.top_k, results)
+
+
+@router.post(
+    "/retrieve/knowledge-graph",
+    response_model=RetrieveResponse,
+    summary="Knowledge Graph retrieval",
+)
+async def retrieve_knowledge_graph(request: RetrieveRequest) -> RetrieveResponse:
+    """
+    Run concept/entity retrieval using the knowledge graph.
+
+    Matches query terms to entities in the knowledge graph, traverses
+    1-hop relationships, and collects linked document chunks ranked by
+    connection strength.
+
+    Only the KnowledgeGraphRetriever is invoked.
+    """
+    from app.retrieval.service import RetrievalService  # noqa: PLC0415
+
+    _validate_retrieve_request(request)
+    service = RetrievalService()
+    results = service.retrieve(query=request.query, top_k=request.top_k, method="knowledge_graph")
+    return _build_retrieve_response(request.query, request.top_k, results)
+
+
+@router.post(
+    "/retrieve/hybrid",
+    response_model=RetrieveResponse,
+    summary="Hybrid (fusion) retrieval",
+)
+async def retrieve_hybrid(request: RetrieveRequest) -> RetrieveResponse:
+    """
+    Run hybrid retrieval combining dense, sparse, and knowledge-graph
+    results using the existing fusion strategy (Reciprocal Rank Fusion).
+
+    Invokes DenseRetriever, SparseRetriever, and KnowledgeGraphRetriever
+    independently, then fuses their ranked results via RRF (k=60).
+
+    The fused results deduplicate across methods and include provenance
+    metadata (``contributing_methods``, ``rrf_k``).
+    """
+    from app.retrieval.service import RetrievalService  # noqa: PLC0415
+
+    _validate_retrieve_request(request)
+    service = RetrievalService()
+    results = service.retrieve(query=request.query, top_k=request.top_k, method="hybrid")
+    return _build_retrieve_response(request.query, request.top_k, results)
 
 
 @router.post("/gaps", response_model=GapsResponse, summary="Retrieve detected gaps")
