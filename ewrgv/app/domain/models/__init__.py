@@ -9,6 +9,10 @@ Exports all domain model classes for convenient single-location imports.
 from app.domain.models.paper import Author, Paper, DocumentChunk
 from app.domain.models.query import ResearchQuery
 from app.domain.models.query_understanding import QueryUnderstanding
+from app.domain.models.candidate_evidence import (
+    CandidateEvidenceAssessment,
+    CandidateEvidenceItem,
+)
 from app.domain.models.candidate_gap import CandidateGap
 from app.domain.models.evidence import Evidence
 from app.domain.models.validation import CoverageAssessment, ValidationResult
@@ -26,6 +30,8 @@ __all__ = [
     "ResearchQuery",
     "QueryUnderstanding",
     "CandidateGap",
+    "CandidateEvidenceItem",
+    "CandidateEvidenceAssessment",
     "Evidence",
     "CoverageAssessment",
     "ValidationResult",
