@@ -139,6 +139,12 @@ Other types from the same list that also apply (may be empty). Do not repeat gap
 The chunk_id values of the passages above that motivate this gap. Copy them exactly. \
 Cite at least one. NEVER cite an ID that does not appear above.
 
+### contradicting_chunk_ids
+The chunk_id values of passages above that suggest this gap may ALREADY be addressed \
+(e.g. a passage reporting a method, dataset, or evaluation that fills it). Return an \
+empty list if none do. Do not list a passage here and in supporting_chunk_ids. \
+NEVER cite an ID that does not appear above.
+
 ### initial_confidence
 A number from 0.0 to 1.0: how strongly the cited passages themselves indicate this gap \
 (e.g. an explicit limitation statement → high; an inference from absence → low). \

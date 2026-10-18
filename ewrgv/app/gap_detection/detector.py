@@ -263,15 +263,14 @@ class GapDetector:
         query_id: str,
     ) -> CandidateGap | None:
         """Map one validated LLM candidate to a CandidateGap, or None if ungrounded."""
-        valid_ids: list[str] = []
-        invalid_ids: list[str] = []
-        for cited in item.supporting_chunk_ids:
-            cid = resolve_chunk_id(cited, chunks_by_id)
-            if cid is not None:
-                if cid not in valid_ids:
-                    valid_ids.append(cid)
-            elif cited not in invalid_ids:
-                invalid_ids.append(cited)
+        valid_ids, invalid_ids = self._resolve_ids(item.supporting_chunk_ids, chunks_by_id)
+        contradicting_ids, invalid_contradicting = self._resolve_ids(
+            item.contradicting_chunk_ids, chunks_by_id
+        )
+        # A passage cited as both supporting and contradicting cannot count as
+        # support; it is kept as counter evidence only.
+        ambiguous_ids = [cid for cid in valid_ids if cid in contradicting_ids]
+        valid_ids = [cid for cid in valid_ids if cid not in contradicting_ids]
 
         if not valid_ids:
             logger.warning(
@@ -301,6 +300,10 @@ class GapDetector:
 
         if invalid_ids:
             metadata["invalid_chunk_ids"] = invalid_ids
+        if invalid_contradicting:
+            metadata["invalid_contradicting_chunk_ids"] = invalid_contradicting
+        if ambiguous_ids:
+            metadata["ambiguous_chunk_ids"] = ambiguous_ids
         if item.rationale:
             metadata["rationale"] = item.rationale
 
@@ -313,6 +316,23 @@ class GapDetector:
             ),
             source_papers=source_papers,
             relevant_passages=valid_ids,
+            contradicting_passages=contradicting_ids,
             initial_confidence=item.initial_confidence,
             metadata=metadata,
         )
+
+    @staticmethod
+    def _resolve_ids(
+        cited_ids: list[str], chunks_by_id: dict[str, DocumentChunk]
+    ) -> tuple[list[str], list[str]]:
+        """Resolve cited IDs against the supplied chunks → (valid, invalid), de-duplicated."""
+        valid: list[str] = []
+        invalid: list[str] = []
+        for cited in cited_ids:
+            cid = resolve_chunk_id(cited, chunks_by_id)
+            if cid is not None:
+                if cid not in valid:
+                    valid.append(cid)
+            elif cited not in invalid:
+                invalid.append(cited)
+        return valid, invalid

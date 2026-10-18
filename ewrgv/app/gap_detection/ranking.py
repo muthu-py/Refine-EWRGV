@@ -16,6 +16,13 @@ Heuristic (deterministic, no LLM)
 
    Weights are normalised to sum to 1, so base ∈ [0, 1].
 
+   If the candidate carries an ``evidence_assessment`` (from
+   CandidateEvidenceScorer), the base is blended with its evidence score:
+
+       base = (1 − evidence_weight) · base + evidence_weight · evidence_score
+
+   Candidates without an assessment are scored exactly as before.
+
 2. Near-duplicate removal: candidates are visited in base-score order; a
    candidate whose statement is identical (ignoring case, punctuation and
    Unicode normalisation form) to, or has Unicode-aware token Jaccard
@@ -113,6 +120,12 @@ class CandidateRanker:
     diversity_penalty:
         Score penalty per already-selected candidate of the same primary
         gap type.  0 disables diversity re-ranking.
+    evidence_weight:
+        In [0, 1].  For candidates that carry an ``evidence_assessment``
+        (CandidateEvidenceScorer), the base score becomes
+        ``(1 − evidence_weight) · heuristic + evidence_weight · evidence_score``.
+        Candidates without an assessment keep the heuristic score unchanged.
+        0 ignores evidence assessments.
     """
 
     def __init__(
@@ -124,6 +137,7 @@ class CandidateRanker:
         passage_saturation: int = 5,
         duplicate_threshold: float = 0.8,
         diversity_penalty: float = 0.1,
+        evidence_weight: float = 0.5,
     ) -> None:
         weights = (confidence_weight, paper_weight, passage_weight)
         if any(w < 0 for w in weights) or sum(weights) <= 0:
@@ -134,6 +148,8 @@ class CandidateRanker:
             raise ValueError("duplicate_threshold must be in (0, 1].")
         if diversity_penalty < 0:
             raise ValueError("diversity_penalty must be non-negative.")
+        if not 0.0 <= evidence_weight <= 1.0:
+            raise ValueError("evidence_weight must be in [0, 1].")
 
         total = sum(weights)
         self._w_conf = confidence_weight / total
@@ -143,6 +159,7 @@ class CandidateRanker:
         self._passage_saturation = passage_saturation
         self._duplicate_threshold = duplicate_threshold
         self._diversity_penalty = diversity_penalty
+        self._evidence_weight = evidence_weight
 
     def _is_near_duplicate(
         self,
@@ -171,11 +188,23 @@ class CandidateRanker:
         confidence = min(max(confidence, 0.0), 1.0)
         papers = len(set(gap.source_papers))
         passages = len(set(gap.relevant_passages))
-        return (
+        heuristic = (
             self._w_conf * confidence
             + self._w_papers * min(papers / self._paper_saturation, 1.0)
             + self._w_passages * min(passages / self._passage_saturation, 1.0)
         )
+        evidence = self._evidence_score(gap)
+        if evidence is None:
+            return heuristic
+        return (1.0 - self._evidence_weight) * heuristic + self._evidence_weight * evidence
+
+    @staticmethod
+    def _evidence_score(gap: CandidateGap) -> float | None:
+        """The candidate's evidence score in [0, 1], or None without an assessment."""
+        assessment = gap.evidence_assessment
+        if assessment is None or math.isnan(assessment.score):
+            return None
+        return min(max(assessment.score, 0.0), 1.0)
 
     def rank(
         self,
@@ -238,6 +267,10 @@ class CandidateRanker:
                 "distinct_papers": len(set(gap.source_papers)),
                 "distinct_passages": len(set(gap.relevant_passages)),
                 "merged_duplicates": list(merged),
+                "evidence_score": self._evidence_score(gap),
+                "evidence_weight": (
+                    self._evidence_weight if self._evidence_score(gap) is not None else 0.0
+                ),
             }
             ranked.append(
                 gap.model_copy(update={"rank": len(ranked) + 1, "metadata": metadata})

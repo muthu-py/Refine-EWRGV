@@ -140,3 +140,17 @@ class TestM2LenientFieldsAndPerCandidateValidation:
     def test_candidate_gaps_must_be_list(self, value):
         with pytest.raises(pydantic.ValidationError):
             GapDetectionLLMOutput.model_validate({"candidate_gaps": value})
+
+
+class TestContradictingChunkIds:
+    @pytest.mark.parametrize(
+        ("value", "expected"), [(None, []), ("c3", ["c3"]), ([" c3 ", "", 5], ["c3"]), (7, [])]
+    )
+    def test_lenient_coercion(self, value, expected):
+        out = CandidateGapLLMOutput.model_validate(
+            {"gap_statement": "g", "contradicting_chunk_ids": value}
+        )
+        assert out.contradicting_chunk_ids == expected
+
+    def test_default_empty(self):
+        assert CandidateGapLLMOutput.model_validate({"gap_statement": "g"}).contradicting_chunk_ids == []

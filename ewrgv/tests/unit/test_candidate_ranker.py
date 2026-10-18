@@ -237,3 +237,54 @@ class TestNaNConfidence:
     def test_infinite_confidence_clamped(self, value, expected):
         ranker = CandidateRanker(paper_weight=0, passage_weight=0)
         assert ranker.base_score(_gap("g", value)) == pytest.approx(expected)
+
+
+def _assessed(statement: str, confidence: float, evidence_score: float) -> CandidateGap:
+    from app.domain.enums import CandidateEvidenceStatus
+    from app.domain.models.candidate_evidence import CandidateEvidenceAssessment
+
+    gap = _gap(statement, confidence)
+    gap.evidence_assessment = CandidateEvidenceAssessment(
+        score=evidence_score, status=CandidateEvidenceStatus.SUPPORTED,
+        support_score=evidence_score, contradiction_ratio=0.0,
+    )
+    return gap
+
+
+class TestEvidenceBlend:
+    """Ranking with pre-validation evidence assessments."""
+
+    def test_no_assessment_keeps_heuristic(self):
+        gap = _gap("g", 0.5)
+        assert CandidateRanker().base_score(gap) == CandidateRanker(evidence_weight=0).base_score(gap)
+
+    def test_blend_formula(self):
+        heuristic = CandidateRanker().base_score(_gap("g", 0.5))
+        blended = CandidateRanker(evidence_weight=0.4).base_score(_assessed("g", 0.5, 0.9))
+        assert blended == pytest.approx(0.6 * heuristic + 0.4 * 0.9)
+
+    def test_evidence_reorders_candidates(self):
+        confident_weak = _assessed("confident weak evidence", 0.9, 0.1)
+        modest_strong = _assessed("modest strong evidence", 0.5, 0.9)
+        ranked = CandidateRanker(diversity_penalty=0).rank([confident_weak, modest_strong], 2)
+        assert ranked[0].gap_statement == "modest strong evidence"
+        assert ranked[0].metadata["ranking"]["evidence_score"] == 0.9
+        assert ranked[0].metadata["ranking"]["evidence_weight"] == 0.5
+
+    def test_zero_evidence_weight_ignores_assessments(self):
+        confident_weak = _assessed("confident weak evidence", 0.9, 0.1)
+        modest_strong = _assessed("modest strong evidence", 0.5, 0.9)
+        ranked = CandidateRanker(diversity_penalty=0, evidence_weight=0).rank(
+            [confident_weak, modest_strong], 2
+        )
+        assert ranked[0].gap_statement == "confident weak evidence"
+
+    def test_unassessed_metadata(self):
+        [ranked] = CandidateRanker().rank([_gap("g", 0.5)], 1)
+        assert ranked.metadata["ranking"]["evidence_score"] is None
+        assert ranked.metadata["ranking"]["evidence_weight"] == 0.0
+
+    @pytest.mark.parametrize("weight", [-0.1, 1.1])
+    def test_invalid_evidence_weight(self, weight):
+        with pytest.raises(ValueError):
+            CandidateRanker(evidence_weight=weight)

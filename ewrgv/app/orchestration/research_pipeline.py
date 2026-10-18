@@ -52,7 +52,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from app.core.exceptions import EWRGVError, IngestionError, ProviderError, RetrievalError
+from app.core.exceptions import (
+    EWRGVError,
+    GapDetectionError,
+    IngestionError,
+    ProviderError,
+    RetrievalError,
+)
 from app.core.logging import get_logger
 from app.domain.enums import PipelineStage
 from app.domain.interfaces import CorpusStore
@@ -62,6 +68,7 @@ from app.domain.models.paper import DocumentChunk
 from app.domain.models.query import ResearchQuery
 from app.domain.models.retrieval_result import RetrievalResult
 from app.domain.models.validation import ValidationResult
+from app.gap_detection.evidence_scoring import CandidateEvidenceScorer
 from app.gap_detection.llm_call import redact_secrets
 from app.ingestion.collectors.service import LiteratureCollectionService
 from app.ingestion.corpus.collection_corpus import CollectionCorpusStore
@@ -171,6 +178,11 @@ class ResearchPipeline:
     collection_retriever_factory : Callable[[CorpusStore], retriever]
         Builds the Stage 4 retriever over the collected-papers corpus.
         Defaults to BM25 (SparseRetriever).
+    evidence_scorer : CandidateEvidenceScorer, optional
+        If given, each detected candidate is given a pre-validation
+        evidence-weighted assessment (Stage 6b) before ranking, and the
+        ranker blends that score in.  ``None`` (default) keeps the previous
+        behaviour.  This is not EWRGV validation.
     """
 
     def __init__(
@@ -187,6 +199,7 @@ class ResearchPipeline:
         literature_collection_service: Optional[LiteratureCollectionService] = None,
         retrieval_top_k: int = 20,
         collection_retriever_factory: Optional[Callable[[CorpusStore], Any]] = None,
+        evidence_scorer: Optional[CandidateEvidenceScorer] = None,
     ) -> None:
         self._qu_service = query_understanding_service
         # Phase 2.2: prefer the high-level service if provided; fall back
@@ -204,6 +217,7 @@ class ResearchPipeline:
         self._collection_retriever_factory = (
             collection_retriever_factory or _default_collection_retriever
         )
+        self._evidence_scorer = evidence_scorer
 
     def run(self, query_text: str) -> PipelineResult:
         """
@@ -388,6 +402,33 @@ class ResearchPipeline:
             result.error = str(exc)
             result.stage_reached = PipelineStage.FAILED
             return result
+
+        # -------------------------------------------------------------- #
+        # Stage 6b (optional): pre-validation evidence-weighted scoring
+        # -------------------------------------------------------------- #
+        if self._evidence_scorer is not None and candidates:
+            paper_lookup = corpus.get_paper_by_id if corpus is not None else None
+            try:
+                candidates = self._evidence_scorer.score_all(
+                    list(candidates), chunks, paper_lookup
+                )
+            except Exception as exc:  # noqa: BLE001 — wrapped like other stage failures
+                error = (
+                    exc
+                    if isinstance(exc, EWRGVError)
+                    else GapDetectionError(
+                        f"Candidate evidence scoring failed: {type(exc).__name__}: {exc}"
+                    )
+                )
+                logger.error(
+                    "ResearchPipeline: Stage 6b failed (candidate evidence scoring)",
+                    extra={"error": str(error)},
+                    exc_info=True,
+                )
+                result.candidate_gaps = list(candidates)
+                result.error = str(error)
+                result.stage_reached = PipelineStage.FAILED
+                return result
 
         result.candidate_gaps = list(candidates)
         result.stage_reached = PipelineStage.GAP_DETECTION

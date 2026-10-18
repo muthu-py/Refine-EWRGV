@@ -430,3 +430,63 @@ class TestFallbackWithoutCollection:
         assert result.retrieved_chunks
         assert all(c.chunk_id.startswith("chunk-0") for c in result.retrieved_chunks)
         assert result.stage_reached == PipelineStage.CANDIDATE_RANKING
+
+
+class TestEvidenceScoringInPipeline:
+    """Stage 6b: optional pre-validation evidence scoring over collected papers."""
+
+    def _detection_with_counter_evidence(self) -> dict:
+        payload = _detection()
+        # Gap 1 (embedded hardware) is contradicted by the transfer-learning abstract.
+        payload["candidate_gaps"][0]["contradicting_chunk_ids"] = [TRANSFER_CHUNK]
+        return payload
+
+    def test_scored_candidates_ranked_with_evidence(self):
+        from app.domain.enums import CandidateEvidenceStatus
+        from app.gap_detection.evidence_scoring import CandidateEvidenceScorer
+
+        llm = ScriptedFakeLLM(_understanding(), self._detection_with_counter_evidence())
+        result = _pipeline(llm, _collection_service(make_collection_result()),
+                           evidence_scorer=CandidateEvidenceScorer()).run(Q_MAIN)
+
+        assert result.error is None
+        assert result.stage_reached == PipelineStage.CANDIDATE_RANKING
+        assessments = {g.gap_statement[:20]: g.evidence_assessment for g in result.candidate_gaps}
+        assert all(a is not None and a.is_validated is False for a in assessments.values())
+
+        statuses = {g.primary_gap_type: g.evidence_assessment.status for g in result.top_k_gaps}
+        assert statuses[GapType.EVALUATION] in (
+            CandidateEvidenceStatus.CONTESTED, CandidateEvidenceStatus.CONTRADICTED
+        )
+        assert statuses[GapType.DATASET] == CandidateEvidenceStatus.SUPPORTED
+
+        dataset_gap = next(g for g in result.top_k_gaps if g.primary_gap_type == GapType.DATASET)
+        refs = [(i.chunk_id, i.paper_id) for i in dataset_gap.evidence_assessment.supporting]
+        assert refs == [(TRANSFER_CHUNK, "oa-transfer"), (CAN_GNN_CHUNK, "s2-can-gnn")]
+        assert dataset_gap.evidence_assessment.supporting[0].publication_year == 2022
+        assert dataset_gap.metadata["ranking"]["evidence_score"] == (
+            dataset_gap.evidence_assessment.score
+        )
+        assert result.top_k_gaps[0].primary_gap_type == GapType.DATASET
+
+    def test_without_scorer_behaviour_unchanged(self):
+        llm = ScriptedFakeLLM(_understanding(), self._detection_with_counter_evidence())
+        result = _pipeline(llm, _collection_service(make_collection_result())).run(Q_MAIN)
+        assert all(g.evidence_assessment is None for g in result.candidate_gaps)
+        assert all(g.metadata["ranking"]["evidence_score"] is None for g in result.top_k_gaps)
+        assert [g.primary_gap_type for g in result.top_k_gaps] == [
+            GapType.DATASET, GapType.EVALUATION
+        ]
+
+    def test_scorer_failure_returns_failed_result(self):
+        class BrokenScorer:
+            def score_all(self, gaps, chunks, paper_lookup=None):
+                raise ValueError("bad weights at runtime")
+
+        llm = ScriptedFakeLLM(_understanding(), _detection())
+        result = _pipeline(llm, _collection_service(make_collection_result()),
+                           evidence_scorer=BrokenScorer()).run(Q_MAIN)
+        assert result.stage_reached == PipelineStage.FAILED
+        assert result.error == "Candidate evidence scoring failed: ValueError: bad weights at runtime"
+        assert len(result.candidate_gaps) == 2  # unscored candidates kept for inspection
+        assert result.top_k_gaps == []

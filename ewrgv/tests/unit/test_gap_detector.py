@@ -464,3 +464,54 @@ class TestChunkIdResolution:
             {"candidate_gaps": [_gap(supporting_chunk_ids=["[chunk_id: c3]"])]}, max_chunks=2
         )
         assert detector.detect(QUERY, _chunks()) == []
+
+
+# ======================================================================
+# Contradicting (counter-evidence) citations
+# ======================================================================
+
+
+class TestContradictingCitations:
+    def test_contradicting_ids_resolved_and_stored(self):
+        detector, _ = _make_detector({"candidate_gaps": [
+            _gap(supporting_chunk_ids=["c1"], contradicting_chunk_ids=["[chunk_id: c3]"])
+        ]})
+        gap = detector.detect(QUERY, _chunks())[0]
+        assert gap.relevant_passages == ["c1"]
+        assert gap.contradicting_passages == ["c3"]
+        assert gap.source_papers == ["p1"]  # counter evidence is not a source of the gap
+
+    def test_missing_field_defaults_to_empty(self):
+        detector, _ = _make_detector({"candidate_gaps": [_gap()]})
+        assert detector.detect(QUERY, _chunks())[0].contradicting_passages == []
+
+    def test_unsupplied_contradicting_ids_recorded(self):
+        detector, _ = _make_detector({"candidate_gaps": [
+            _gap(contradicting_chunk_ids=["ghost", "c3"])
+        ]})
+        gap = detector.detect(QUERY, _chunks())[0]
+        assert gap.contradicting_passages == ["c3"]
+        assert gap.metadata["invalid_contradicting_chunk_ids"] == ["ghost"]
+
+    def test_passage_in_both_lists_kept_only_as_counter_evidence(self):
+        detector, _ = _make_detector({"candidate_gaps": [
+            _gap(supporting_chunk_ids=["c1", "c2"], contradicting_chunk_ids=["c2"])
+        ]})
+        gap = detector.detect(QUERY, _chunks())[0]
+        assert gap.relevant_passages == ["c1"]
+        assert gap.contradicting_passages == ["c2"]
+        assert gap.metadata["ambiguous_chunk_ids"] == ["c2"]
+
+    def test_candidate_whose_only_support_is_ambiguous_is_dropped(self):
+        detector, _ = _make_detector({"candidate_gaps": [
+            _gap(supporting_chunk_ids=["c1"], contradicting_chunk_ids=["c1"])
+        ]})
+        assert detector.detect(QUERY, _chunks()) == []
+
+    def test_prompt_and_schema_request_counter_evidence(self):
+        detector, mock_llm = _make_detector({"candidate_gaps": []})
+        detector.detect(QUERY, _chunks())
+        prompt, schema = mock_llm.complete_structured.call_args.args
+        assert "### contradicting_chunk_ids" in prompt
+        item = schema["properties"]["candidate_gaps"]["items"]
+        assert "contradicting_chunk_ids" in item["properties"]

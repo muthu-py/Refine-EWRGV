@@ -124,6 +124,7 @@ class CandidateGapLLMOutput(GapRepresentationLLMOutput):
     gap_type: Optional[str] = None
     secondary_gap_types: list[str] = Field(default_factory=list)
     supporting_chunk_ids: list[str] = Field(default_factory=list)
+    contradicting_chunk_ids: list[str] = Field(default_factory=list)
     initial_confidence: float = 0.0
     rationale: Optional[str] = None
 
@@ -132,7 +133,9 @@ class CandidateGapLLMOutput(GapRepresentationLLMOutput):
     def strip_statement(cls, v: object) -> object:
         return v.strip() if isinstance(v, str) else v
 
-    @field_validator("secondary_gap_types", "supporting_chunk_ids", mode="before")
+    @field_validator(
+        "secondary_gap_types", "supporting_chunk_ids", "contradicting_chunk_ids", mode="before"
+    )
     @classmethod
     def coerce_raw_lists(cls, v: object) -> list:
         return _clean_string_list(v)
@@ -219,6 +222,14 @@ class GapDetectionLLMOutput(BaseModel):
                 "items": {"type": "string"},
                 "minItems": 1,
                 "description": "IDs of the provided passages that ground this gap.",
+            },
+            "contradicting_chunk_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "IDs of the provided passages suggesting this gap may already "
+                    "be addressed (may be empty)."
+                ),
             },
             "initial_confidence": {
                 "type": "number",
