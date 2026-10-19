@@ -21,7 +21,7 @@ Design notes
 from __future__ import annotations
 
 from typing import Any, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ParsedPage(BaseModel):
@@ -85,6 +85,14 @@ class ParsedDocument(BaseModel):
     pages_with_text: int = 0
     metadata: dict[str, Any] = Field(default_factory=dict)
     pages: list[ParsedPage] = Field(default_factory=list)
+
+    @field_validator("paper_id", mode="before")
+    @classmethod
+    def _coerce_paper_id(cls, value: Any) -> Any:
+        """asyncpg returns UUID objects; the domain model stores paper_id as str."""
+        if value is None:
+            return value
+        return str(value)
 
     @classmethod
     def build(

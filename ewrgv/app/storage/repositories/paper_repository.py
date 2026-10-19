@@ -215,7 +215,13 @@ class PaperRepository:
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, run_id)
-            return [dict(r) for r in rows]
+            papers = []
+            for r in rows:
+                paper = dict(r)
+                # Domain/worker code expects paper_id as str, not asyncpg UUID.
+                paper["paper_id"] = str(paper["paper_id"])
+                papers.append(paper)
+            return papers
 
     async def update_parsing_metadata(
         self,

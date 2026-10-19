@@ -67,6 +67,21 @@ class TestParsedDocument:
         assert doc.total_character_count == 10  # 5 + 5
         assert doc.pages_with_text == 2
 
+    def test_build_coerces_uuid_paper_id_to_str(self):
+        """asyncpg yields uuid.UUID; ParsedDocument must accept it as paper_id."""
+        from uuid import UUID
+
+        paper_uuid = UUID("01cade69-4d69-406f-bc91-c7fe726a4326")
+        doc = ParsedDocument.build(
+            paper_id=paper_uuid,  # type: ignore[arg-type]
+            source_storage_path="papers/01cade69-4d69-406f-bc91-c7fe726a4326/fulltext.pdf",
+            pages=self._make_pages(["Hello"]),
+        )
+        assert doc.paper_id == "01cade69-4d69-406f-bc91-c7fe726a4326"
+        assert isinstance(doc.paper_id, str)
+        data = json.loads(doc.model_dump_json())
+        assert data["paper_id"] == "01cade69-4d69-406f-bc91-c7fe726a4326"
+
     def test_build_empty_page_not_counted(self):
         pages = self._make_pages(["Hello", ""])
         doc = ParsedDocument.build(

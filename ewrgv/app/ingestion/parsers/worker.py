@@ -79,7 +79,8 @@ async def run_parsing(
         )
 
         for paper in papers:
-            paper_id = paper["paper_id"]
+            # Repository/asyncpg may yield uuid.UUID; keep a stable string id.
+            paper_id = str(paper["paper_id"])
             storage_path = paper.get("storage_path") or ""
 
             if not storage_path:
@@ -154,8 +155,11 @@ async def run_parsing(
 
             except (IngestionError, StorageError) as exc:
                 logger.warning(
-                    "Parsing worker: error processing paper",
-                    extra={"paper_id": paper_id, "error": str(exc)},
+                    "Parsing worker: error processing paper paper_id=%s error=%s detail=%s",
+                    paper_id,
+                    exc,
+                    getattr(exc, "detail", None),
+                    exc_info=True,
                 )
                 await repo.update_parsing_metadata(
                     paper_id=paper_id,
@@ -164,17 +168,24 @@ async def run_parsing(
                 job.failed += 1
 
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Parsing worker: unexpected error processing paper",
-                    extra={"paper_id": paper_id, "error": str(exc)},
+                logger.error(
+                    "Parsing worker: unexpected error processing paper paper_id=%s error=%s",
+                    paper_id,
+                    exc,
+                    exc_info=True,
                 )
                 try:
                     await repo.update_parsing_metadata(
                         paper_id=paper_id,
                         status="PARSE_FAILED",
                     )
-                except Exception:  # noqa: BLE001
-                    pass  # Don't let a DB update failure mask the original error
+                except Exception as mark_exc:  # noqa: BLE001
+                    logger.error(
+                        "Parsing worker: failed to mark PARSE_FAILED paper_id=%s error=%s",
+                        paper_id,
+                        mark_exc,
+                        exc_info=True,
+                    )
                 job.failed += 1
 
             await job_store.update_parsing_job(job)
@@ -183,8 +194,10 @@ async def run_parsing(
 
     except Exception as exc:  # noqa: BLE001
         logger.error(
-            "Parsing worker: fatal error",
-            extra={"job_id": job.job_id, "error": str(exc)},
+            "Parsing worker: fatal error job_id=%s error=%s",
+            job.job_id,
+            exc,
+            exc_info=True,
         )
         job.status = JobStatus.FAILED
         job.error = str(exc)

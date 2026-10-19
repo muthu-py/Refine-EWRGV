@@ -83,6 +83,8 @@ class PDFParser:
             - If the file cannot be opened as a valid PDF.
             - If the PDF has zero pages.
         """
+        # asyncpg returns uuid.UUID; ParsedDocument.paper_id is a string.
+        paper_id = str(paper_id)
         # Normalise path: strip leading "{bucket}/" double-prefix if present
         clean_path = self._normalise_path(storage_path)
 

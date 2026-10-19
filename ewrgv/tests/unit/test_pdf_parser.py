@@ -114,6 +114,19 @@ class TestValidPDF:
         assert "Hello from page one" in doc.pages[0].text
 
     @pytest.mark.asyncio
+    async def test_uuid_paper_id_from_asyncpg_is_accepted(self):
+        from uuid import UUID
+
+        pdf_bytes = make_pdf_bytes(["Hello from page one"])
+        storage = make_mock_storage(pdf_bytes)
+        parser = PDFParser(storage_client=storage)
+        paper_uuid = UUID("01cade69-4d69-406f-bc91-c7fe726a4326")
+
+        doc = await parser.parse(paper_uuid, "papers/01cade69-4d69-406f-bc91-c7fe726a4326/fulltext.pdf")
+
+        assert doc.paper_id == "01cade69-4d69-406f-bc91-c7fe726a4326"
+
+    @pytest.mark.asyncio
     async def test_character_counts_positive(self):
         pdf_bytes = make_pdf_bytes(["Short text"])
         storage = make_mock_storage(pdf_bytes)
@@ -354,6 +367,44 @@ class TestWorkerResilience:
         # Paper A failed, B and C succeeded
         assert job.failed >= 1
         assert job.parsed >= 1  # at least one succeeded
+
+    @pytest.mark.asyncio
+    async def test_uuid_paper_ids_from_repository_are_parsed(self):
+        """Reproduce the live failure: asyncpg returns uuid.UUID paper_id values."""
+        from uuid import UUID
+        from app.core.job_store import JobStore, JobStatus
+        from app.ingestion.parsers.worker import run_parsing
+
+        good_pdf = make_pdf_bytes(["Good content that is long enough " * 10])
+        paper_uuid = UUID("01cade69-4d69-406f-bc91-c7fe726a4326")
+        papers = [{"paper_id": paper_uuid, "storage_path": f"papers/{paper_uuid}/fulltext.pdf"}]
+        update_calls = []
+
+        async def mock_update(paper_id, status, **kwargs):
+            update_calls.append((paper_id, status, kwargs))
+
+        mock_repo = MagicMock()
+        mock_repo.get_papers_for_parsing = AsyncMock(return_value=papers)
+        mock_repo.update_parsing_metadata = AsyncMock(side_effect=mock_update)
+
+        with patch("app.ingestion.parsers.worker.SupabaseStorageClient") as mock_sc_cls:
+            mock_sc = MagicMock()
+            mock_sc.download = AsyncMock(return_value=good_pdf)
+            mock_sc.upload = AsyncMock(return_value=f"papers/{paper_uuid}/parsed.json")
+            mock_sc.close = AsyncMock()
+            mock_sc_cls.return_value = mock_sc
+
+            job_store = JobStore()
+            job = await job_store.create_parsing_job("run-uuid")
+            await run_parsing(job=job, job_store=job_store, repo=mock_repo)
+
+        assert job.status == JobStatus.COMPLETED
+        assert job.parsed == 1
+        assert job.failed == 0
+        assert update_calls[0][0] == str(paper_uuid)
+        assert update_calls[0][1] == "PARSED"
+        assert update_calls[0][2]["page_count"] >= 1
+        assert update_calls[0][2]["parsed_storage_path"] == f"papers/{paper_uuid}/parsed.json"
 
 
 # ------------------------------------------------------------------ #
