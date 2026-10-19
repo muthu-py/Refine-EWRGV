@@ -54,6 +54,20 @@ class EvidenceType(str, Enum):
     INSUFFICIENT = "Insufficient"       # Related but too weak to classify
 
 
+class CandidateEvidenceStatus(str, Enum):
+    """
+    Pre-validation evidence status of a CandidateGap, assigned by the
+    candidate evidence scorer (app/gap_detection/evidence_scoring.py).
+
+    This describes only the evidence retrieved for the candidate.  It is NOT
+    a validation outcome (see GapClassification for that).
+    """
+    SUPPORTED = "supported"                  # Supporting evidence, none contradicting
+    CONTESTED = "contested"                  # Contradicting evidence, but outweighed
+    CONTRADICTED = "contradicted"            # Contradicting evidence outweighs support
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"  # No usable supporting evidence
+
+
 # ------------------------------------------------------------------ #
 # Validation Classification
 # ------------------------------------------------------------------ #
