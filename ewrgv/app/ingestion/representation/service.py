@@ -74,7 +74,7 @@ class RepresentationService:
 
         # 2. Process each paper for embeddings
         for paper in papers:
-            paper_id = paper["paper_id"]
+            paper_id = str(paper["paper_id"])  # asyncpg returns uuid.UUID; chunk_embeddings.paper_id is TEXT
             try:
                 # 2a. Download chunks.json
                 chunks_path = get_chunks_path(paper_id)
@@ -92,6 +92,14 @@ class RepresentationService:
                 # 2b. Check existing embeddings (Incremental)
                 model_name = self._provider.get_model_name()
                 existing_ids = await self._embedding_repo.get_embedded_chunk_ids(paper_id, model_name)
+
+                # Re-chunking issues new chunk_ids; drop vectors of chunks that no
+                # longer exist so counts and paper status stay accurate.
+                stale_ids = existing_ids - {c.chunk_id for c in paper_chunks}
+                if stale_ids:
+                    await self._embedding_repo.delete_embeddings(sorted(stale_ids), model_name)
+                    existing_ids = existing_ids - stale_ids
+                    logger.info("Paper %s: pruned %d stale embeddings.", paper_id, len(stale_ids))
                 
                 # Empty chunks are skipped: providers reject empty inputs (Gemini: 400).
                 embeddable = [c for c in paper_chunks if c.text and c.text.strip()]

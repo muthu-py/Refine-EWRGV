@@ -72,11 +72,17 @@ class ChunkConfig:
     min_chunk_size:
         Chunks below this token count are still emitted (never discarded),
         but a warning may be logged.
+    min_chunk_words:
+        Sections with fewer words are merged into a neighbouring section
+        before chunking, and a trailing chunk with fewer words is merged
+        into the previous chunk of its section.  Stops false headings and
+        wrapped PDF lines from producing 3-word "chunks".  0 disables.
     """
     target_chunk_size: int = 500      # ~2000 characters
     max_chunk_size: int = 600         # ~2400 characters
     overlap_size: int = 75            # ~300 characters
     min_chunk_size: int = 20          # ~80 characters
+    min_chunk_words: int = 60
 
     @property
     def target_chars(self) -> int:
@@ -120,6 +126,28 @@ def _split_sentences(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Paragraph splitter
 # ---------------------------------------------------------------------------
+
+def _normalize_text(text: str) -> str:
+    """
+    Undo PDF line wrapping: a single newline inside a paragraph becomes a
+    space (keeping hyphenated words joined); blank lines that only contain
+    whitespace become real paragraph breaks.
+    """
+    text = re.sub(r"\n[ \t]+\n", "\n\n", text)
+    text = re.sub(r"(\w)-[ \t]*\n(?!\n)[ \t]*([a-z])", r"\1\2", text)
+    text = re.sub(r"[ \t]*(?<!\n)\n(?!\n)[ \t]*", " ", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+
+def _word_count(text: str) -> int:
+    return len(text.split())
+
+
+# Section types kept as their own chunk even when short: they are the
+# primary gap evidence and must keep their section_type.
+_PROTECTED_TYPES = {"LIMITATIONS", "FUTURE_WORK"}
+
 
 def _split_paragraphs(text: str) -> list[str]:
     """Split text at double-newline boundaries (paragraph breaks)."""
@@ -181,8 +209,8 @@ class SectionChunker:
         all_chunks: list[PaperChunk] = []
         diag = ChunkingDiagnostics(total_sections=len(extraction_result.sections))
 
-        for section in extraction_result.sections:
-            section_chunks = self._chunk_section(section, paper_id)
+        for section in self._merge_small_sections(extraction_result.sections):
+            section_chunks = self._merge_small_chunks(self._chunk_section(section, paper_id), section, paper_id)
             # Update global chunk_index across all sections
             for ch in section_chunks:
                 ch.chunk_index = len(all_chunks) + section_chunks.index(ch)
@@ -223,7 +251,7 @@ class SectionChunker:
 
         Section boundaries are NEVER crossed.
         """
-        text = section.text.strip()
+        text = _normalize_text(section.text)
         if not text:
             return []
 
@@ -307,6 +335,87 @@ class SectionChunker:
             chunks.append(chunk)
 
         return chunks
+
+    # ------------------------------------------------------------------ #
+    # Small-fragment merging
+    # ------------------------------------------------------------------ #
+
+    def _merge_small_sections(self, sections: list[ParsedSection]) -> list[ParsedSection]:
+        """
+        Fold sections shorter than min_chunk_words into the previous section
+        (or the next one, for a short first section).
+
+        A short section is almost always a false heading (wrapped line,
+        author name, page header) that split real prose.  Its title is kept
+        as text, since for a false heading the "title" is body text.
+        LIMITATIONS / FUTURE_WORK sections are never folded.
+        """
+        min_words = self._cfg.min_chunk_words
+        if min_words <= 0:
+            return list(sections)
+
+        def protected(sec: ParsedSection) -> bool:
+            return getattr(sec.section_type, "value", str(sec.section_type)) in _PROTECTED_TYPES
+
+        def size(sec: ParsedSection) -> int:
+            return _word_count(sec.text)
+
+        def absorb(into: ParsedSection, other: ParsedSection, prepend: bool) -> ParsedSection:
+            piece = "\n\n".join(t for t in (other.title.strip(), other.text.strip()) if t)
+            text = f"{piece}\n\n{into.text}" if prepend else f"{into.text}\n\n{piece}"
+            return into.model_copy(update={
+                "text": text.strip(),
+                "character_count": len(text.strip()),
+                "page_start": min(into.page_start, other.page_start),
+                "page_end": max(into.page_end, other.page_end),
+            })
+
+        merged: list[ParsedSection] = []
+        pending: list[ParsedSection] = []  # short sections before any keeper
+        for sec in sections:
+            if size(sec) >= min_words or protected(sec):
+                for early in reversed(pending):
+                    sec = absorb(sec, early, prepend=True)
+                pending = []
+                merged.append(sec)
+            elif merged and not protected(merged[-1]):
+                merged[-1] = absorb(merged[-1], sec, prepend=False)
+            elif merged:
+                pending.append(sec)  # don't dilute a protected section; fold forward
+            else:
+                pending.append(sec)
+        if pending:
+            if merged:
+                for sec in pending:
+                    merged[-1] = absorb(merged[-1], sec, prepend=False)
+            else:
+                first = pending[0]
+                for sec in pending[1:]:
+                    first = absorb(first, sec, prepend=False)
+                merged.append(first)
+        return merged
+
+    def _merge_small_chunks(
+        self, chunks: list[PaperChunk], section: ParsedSection, paper_id: str
+    ) -> list[PaperChunk]:
+        """Merge a too-short chunk into the previous chunk of the same section."""
+        min_words = self._cfg.min_chunk_words
+        if min_words <= 0 or len(chunks) < 2:
+            return chunks
+        out: list[PaperChunk] = [chunks[0]]
+        for ch in chunks[1:]:
+            prev = out[-1]
+            if _word_count(ch.text) < min_words and len(prev.text) + len(ch.text) <= self._cfg.max_chars * 1.25:
+                out[-1] = self._make_chunk(
+                    text=f"{prev.text}\n\n{ch.text}",
+                    section=section,
+                    paper_id=paper_id,
+                    char_start=prev.char_start,
+                    char_end=ch.char_end,
+                )
+            else:
+                out.append(ch)
+        return out
 
     # ------------------------------------------------------------------ #
     # Large paragraph → sentence chunks

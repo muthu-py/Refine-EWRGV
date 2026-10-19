@@ -138,9 +138,15 @@ async def test_save_empty_collection(mock_db_pool):
     repo = PaperRepository(mock_db_pool)
     empty_result = CollectionResult(query_id="q1", papers=[])
 
-    await repo.save_collection_result(empty_result, "Any query?")
+    await repo.save_collection_result(empty_result, "Any query?", query_id="qid-1")
 
-    mock_db_pool.acquire.assert_not_called()
+    # The run row is still written (so the returned run_id is valid); no papers.
+    conn = mock_db_pool.acquire.return_value.__aenter__.return_value
+    assert conn.execute.await_count == 1
+    sql, run_id, question, query_id = conn.execute.await_args.args
+    assert "INSERT INTO research_runs" in sql
+    assert (run_id, question, query_id) == ("q1", "Any query?", "qid-1")
+    conn.fetchrow.assert_not_called()
 
 
 # ------------------------------------------------------------------ #

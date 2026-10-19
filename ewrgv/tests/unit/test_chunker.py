@@ -73,6 +73,7 @@ SMALL_CONFIG = ChunkConfig(
     max_chunk_size=75,       # ~300 chars
     overlap_size=10,         # ~40 chars
     min_chunk_size=5,
+    min_chunk_words=0,       # these tests exercise splitting, not fragment merging
 )
 
 
@@ -214,7 +215,7 @@ class TestSmallParagraphsCombined:
         paras = ["Short para " + str(i) for i in range(5)]
         text = "\n\n".join(paras)
         ex = make_extraction([make_section(text)])
-        big_config = ChunkConfig(target_chunk_size=500, max_chunk_size=600, overlap_size=50, min_chunk_size=5)
+        big_config = ChunkConfig(target_chunk_size=500, max_chunk_size=600, overlap_size=50, min_chunk_size=5, min_chunk_words=0)
         chunker = SectionChunker(config=big_config)
         result = chunker.chunk(ex, "papers/paper-test/sections.json")
         # 5 tiny paragraphs with large target should produce fewer chunks than 5
@@ -361,7 +362,7 @@ class TestOverlap:
         """Verify that overlap text appears in consecutive chunks within a section."""
         sentences = ["Sentence number %d here. " % i for i in range(60)]
         text = " ".join(sentences)
-        config = ChunkConfig(target_chunk_size=30, max_chunk_size=40, overlap_size=10, min_chunk_size=5)
+        config = ChunkConfig(target_chunk_size=30, max_chunk_size=40, overlap_size=10, min_chunk_size=5, min_chunk_words=0)
         ex = make_extraction([make_section(text)])
         chunker = SectionChunker(config=config)
         result = chunker.chunk(ex, "papers/paper-test/sections.json")
@@ -537,3 +538,69 @@ class TestProvenance:
         result = chunker.chunk(ex, "papers/paper-test/sections.json")
         for chunk in result.chunks:
             assert chunk.token_count > 0
+
+
+# ---------------------------------------------------------------------------
+# Fragment merging (PDF line wrapping / false headings)
+# ---------------------------------------------------------------------------
+
+
+class TestFragmentMerging:
+    """Tiny false-heading sections and wrapped lines must not become 3-word chunks."""
+
+    CONFIG = ChunkConfig(target_chunk_size=500, max_chunk_size=600, overlap_size=0, min_chunk_size=5, min_chunk_words=60)
+
+    PROSE = (
+        "Retinal disease screening with deep convolutional networks has improved "
+        "sensitivity on public fundus datasets, but most studies evaluate on a single "
+        "camera type and report accuracy without calibration or external validation. "
+    )
+
+    def test_single_newlines_are_joined(self) -> None:
+        text = "retinal \ndisease \ndetection " + self.PROSE * 3
+        result = SectionChunker(config=self.CONFIG).chunk(make_extraction([make_section(text)]), "p")
+        assert "retinal disease detection" in result.chunks[0].text
+        assert "\n" not in result.chunks[0].text.split("\n\n")[0]
+
+    def test_false_heading_sections_are_folded_into_previous(self) -> None:
+        sections = [
+            make_section(self.PROSE * 3, SectionType.INTRODUCTION, title="1. Introduction", order=0),
+            make_section("retinal disease diagnosis system based on image", SectionType.OTHER,
+                         title="Zhang et al. (2014) proposed an automated", order=1),
+            make_section("retinal \ndisease \ndetection", SectionType.OTHER,
+                         title="The proposed Local Binary Pattern (LBP)-based", order=2),
+        ]
+        result = SectionChunker(config=self.CONFIG).chunk(make_extraction(sections), "p")
+        assert len(result.chunks) == 1
+        chunk = result.chunks[0]
+        assert chunk.section_type == SectionType.INTRODUCTION
+        assert "Zhang et al. (2014) proposed an automated" in chunk.text
+        assert "retinal disease detection" in chunk.text
+
+    def test_short_first_section_folds_forward(self) -> None:
+        sections = [
+            make_section("Alivia Rahma Sakina", SectionType.OTHER, title="Author", order=0),
+            make_section(self.PROSE * 3, SectionType.METHODOLOGY, order=1),
+        ]
+        result = SectionChunker(config=self.CONFIG).chunk(make_extraction(sections), "p")
+        assert len(result.chunks) == 1
+        assert result.chunks[0].section_type == SectionType.METHODOLOGY
+        assert result.chunks[0].text.startswith("Author")
+
+    def test_short_limitations_section_is_kept(self) -> None:
+        sections = [
+            make_section(self.PROSE * 3, SectionType.RESULTS, title="Results", order=0),
+            make_section("Our dataset came from one hospital.", SectionType.LIMITATIONS,
+                         title="Limitations", order=1),
+        ]
+        result = SectionChunker(config=self.CONFIG).chunk(make_extraction(sections), "p")
+        types = [c.section_type for c in result.chunks]
+        assert types == [SectionType.RESULTS, SectionType.LIMITATIONS]
+
+    def test_every_chunk_meets_minimum_words(self) -> None:
+        sections = [make_section(self.PROSE * 2, order=0)] + [
+            make_section(f"fragment {i} of wrapped text", SectionType.OTHER, title=f"Line {i}", order=i + 1)
+            for i in range(10)
+        ]
+        result = SectionChunker(config=self.CONFIG).chunk(make_extraction(sections), "p")
+        assert all(len(c.text.split()) >= 60 for c in result.chunks)

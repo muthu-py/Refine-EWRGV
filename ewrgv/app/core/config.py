@@ -82,6 +82,8 @@ class Settings(BaseSettings):
     # BM25 (Phase 2.9)
     # ------------------------------------------------------------------ #
     BM25_INDEX_PATH: str = "data/artifacts/bm25"
+    RETRIEVAL_MAX_PER_PAPER: int = 3      # cap hits per paper in a result list (0 = no cap)
+    RETRIEVAL_CORPUS_CACHE_TTL: int = 900 # seconds a loaded run corpus is reused (0 = no cache)
 
     # ------------------------------------------------------------------ #
     # Vector Store
@@ -132,6 +134,7 @@ class Settings(BaseSettings):
     CHUNK_MAX_SIZE: int = 600       # hard upper bound tokens per chunk
     CHUNK_OVERLAP: int = 75         # overlap tokens between consecutive chunks
     CHUNK_MIN_SIZE: int = 20        # minimum tokens to emit a chunk
+    CHUNK_MIN_WORDS: int = 60       # fold smaller sections / trailing chunks into neighbours (0 = off)
 
     # ------------------------------------------------------------------ #
     # Retrieval

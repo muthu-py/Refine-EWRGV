@@ -1,5 +1,5 @@
 """
-Apply the pending schema migrations (04, 05, 07) to the Supabase database
+Apply the pending schema migrations (04, 05, 07, 08, 09) to the Supabase database
 in SUPABASE_DATABASE_URL.  Every statement uses IF NOT EXISTS, so re-running
 is safe.  06 is skipped: it uses ADD CONSTRAINT IF NOT EXISTS, which
 PostgreSQL does not support.
@@ -21,6 +21,8 @@ MIGRATIONS = [
     "04_add_section_columns.sql",
     "05_add_chunk_columns.sql",
     "07_add_embedding_table.sql",
+    "08_embeddings_384.sql",
+    "09_query_runs.sql",
 ]
 
 
@@ -43,6 +45,12 @@ async def main() -> None:
         table = await conn.fetchval("SELECT to_regclass('public.chunk_embeddings')")
         print("papers columns present:", sorted(r["column_name"] for r in cols))
         print("chunk_embeddings table:", table)
+        col_type = await conn.fetchval(
+            "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+            "WHERE attrelid = 'public.chunk_embeddings'::regclass AND attname = 'embedding'"
+        )
+        print("chunk_embeddings.embedding type:", col_type)
+        print("chunk_embeddings rows:", await conn.fetchval("SELECT count(*) FROM chunk_embeddings"))
     finally:
         await conn.close()
 

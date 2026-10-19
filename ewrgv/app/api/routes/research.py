@@ -105,13 +105,23 @@ class QueryResponse(BaseModel):
     query_type: str = "Unknown"
     understanding: Optional[QueryUnderstandingResponse] = None
     expanded_queries: list[str] = []
+    saved: bool = False   # stored in query_runs, so /collect {query_id} works
 
 
 class CollectRequest(BaseModel):
-    """Request body for POST /research/collect."""
-    query: str
+    """
+    Request body for POST /research/collect.
+
+    Normal use: pass the ``query_id`` returned by /query; the stored question
+    and ALL its expanded queries are searched.  ``query`` / ``expanded_queries``
+    still work without a query_id (and override the stored ones when given).
+    """
+    query_id: Optional[str] = None
+    query: Optional[str] = None
     expanded_queries: list[str] = []
-    max_results_per_query: int = 20
+    include_original_query: bool = True     # also search the question itself
+    max_results_per_query: Optional[int] = None   # default: SEMANTIC_SCHOLAR_MAX_RESULTS
+    max_total_results: Optional[int] = None       # default: LITERATURE_MAX_TOTAL_RESULTS
 
 
 class CollectPaperResponse(BaseModel):
@@ -131,6 +141,8 @@ class CollectResponse(BaseModel):
     """Response from POST /research/collect."""
     status: str
     run_id: str = ""
+    query_id: Optional[str] = None
+    capped: bool = False
     queries_searched: list[str] = []
     providers_used: list[str] = []
     total_results: int = 0
@@ -195,10 +207,33 @@ class ValidateResponse(BaseModel):
     validation_results: list[dict]
 
 
-class RetrieveRequest(BaseModel):
-    """Request body for POST /research/retrieve/* endpoints."""
+class RetrieveFilterFields(BaseModel):
+    """Optional result filters shared by every retrieve endpoint."""
+    section_types: list[str] = []      # e.g. ["LIMITATIONS"] or the preset ["gap_evidence"]
+    paper_ids: list[str] = []
+    year_from: Optional[int] = None
+    year_to: Optional[int] = None
+    include_noise: bool = False        # True also searches references / acknowledgments / boilerplate
+
+
+class RetrieveRequest(RetrieveFilterFields):
+    """Request body for POST /research/retrieve/{dense,sparse,hybrid}."""
     run_id: str
     query: str
+    top_k: int = 10
+
+
+class MultiRetrieveRequest(RetrieveFilterFields):
+    """
+    Request body for POST /research/retrieve/multi.
+
+    Give ``queries`` explicitly, or a ``query_id`` from /query to use the
+    stored question plus all its expanded queries.
+    """
+    run_id: str
+    queries: list[str] = []
+    query_id: Optional[str] = None
+    method: str = "hybrid"
     top_k: int = 10
 
 
@@ -341,6 +376,38 @@ def _get_collection_service() -> Any:
     )
 
 
+def _search_queries(question: str, expanded: list[str], include_original: bool = True) -> list[str]:
+    """The question first (unless excluded), then the expansions; case-insensitive de-duplication."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for q in ([question] if include_original else []) + list(expanded or []):
+        key = " ".join((q or "").lower().split())
+        if key and key not in seen:
+            seen.add(key)
+            out.append(q.strip())
+    return out
+
+
+async def _save_query_run(query: Any) -> bool:
+    """Persist a /query result; False (logged) when the database is unavailable."""
+    try:
+        from app.storage.relational.database import get_db_pool  # noqa: PLC0415
+        from app.storage.repositories.query_repository import QueryRunRepository  # noqa: PLC0415
+
+        await QueryRunRepository(await get_db_pool()).save(query)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to persist query run", extra={"query_id": query.query_id, "error": str(exc)})
+        return False
+
+
+async def _load_query_run(query_id: str) -> Optional[dict]:
+    from app.storage.relational.database import get_db_pool  # noqa: PLC0415
+    from app.storage.repositories.query_repository import QueryRunRepository  # noqa: PLC0415
+
+    return await QueryRunRepository(await get_db_pool()).get(query_id)
+
+
 # ------------------------------------------------------------------ #
 # Route handlers
 # ------------------------------------------------------------------ #
@@ -365,11 +432,14 @@ async def submit_research_query(request: QueryRequest) -> QueryResponse:
     qu_service = _get_qu_service()
 
     if qu_service is None:
-        # Stub mode — no LLM configured
-        job_id = str(uuid4())
+        # Stub mode — no LLM configured; still stored so /collect {query_id} works
+        stub = ResearchQuery(query=request.query)
+        job_id = stub.query_id
+        saved = await _save_query_run(stub)
         return QueryResponse(
             job_id=job_id,
             query_id=job_id,
+            saved=saved,
             status="accepted",
             message=(
                 "Research query accepted. LLM_API_KEY is not configured; "
@@ -409,9 +479,11 @@ async def submit_research_query(request: QueryRequest) -> QueryResponse:
             method_variants=u.method_variants,
         )
 
+    saved = await _save_query_run(enriched)
     return QueryResponse(
         job_id=enriched.query_id,
         query_id=enriched.query_id,
+        saved=saved,
         status="understood",
         message=(
             f"Query understanding complete. "
@@ -426,45 +498,80 @@ async def submit_research_query(request: QueryRequest) -> QueryResponse:
 @router.post("/collect", response_model=CollectResponse, summary="Collect literature")
 async def collect_literature(request: CollectRequest) -> CollectResponse:
     """
-    Search academic literature using the expanded queries from Phase 2.1.
+    Search academic literature for a research question.
 
-    This endpoint dispatches to all configured providers (Semantic Scholar,
-    OpenAlex) and returns normalised papers with provenance.
+    Pass the ``query_id`` from /query: the stored question **and all of its
+    expanded queries** are searched on every configured provider (Semantic
+    Scholar, OpenAlex).  Papers are persisted with provenance and the run is
+    linked to the query.  Returns ``run_id`` for /acquire and later stages.
+
+    Errors: 400 without query/query_id, 404 for an unknown query_id,
+    503 when the run cannot be saved (no run_id is returned in that case).
     """
+    import asyncio  # noqa: PLC0415
+
+    from app.core.exceptions import BadRequestError, NotFoundError, ServiceUnavailableError  # noqa: PLC0415
     from app.domain.models.query import ResearchQuery  # noqa: PLC0415
+
+    question = (request.query or "").strip()
+    expanded = [q for q in request.expanded_queries if q and q.strip()]
+    if request.query_id:
+        try:
+            stored = await _load_query_run(request.query_id)
+        except Exception as exc:  # noqa: BLE001
+            raise ServiceUnavailableError(f"Could not load query_id '{request.query_id}': {exc}") from exc
+        if stored is None:
+            raise NotFoundError(f"query_id '{request.query_id}' not found; call /query first.")
+        question = question or stored["research_question"]
+        expanded = expanded or list(stored["expanded_queries"])
+    if not question:
+        raise BadRequestError("Give a query_id from /query, or a query.")
+    for name, value in (("max_results_per_query", request.max_results_per_query),
+                        ("max_total_results", request.max_total_results)):
+        if value is not None and value < 1:
+            raise BadRequestError(f"{name} must be >= 1.")
 
     service = _get_collection_service()
     if service is None:
         return CollectResponse(
             status="error",
+            query_id=request.query_id,
             provider_errors=[{"provider": "all", "error": "No literature providers configured."}],
         )
 
     rq = ResearchQuery(
-        query=request.query,
-        expanded_queries=request.expanded_queries,
+        query=question,
+        expanded_queries=_search_queries(question, expanded, request.include_original_query),
     )
-    result = service.collect(rq)
+    # Provider calls are blocking HTTP; keep the event loop free.
+    result = await asyncio.to_thread(
+        service.collect,
+        rq,
+        max_results_per_query=request.max_results_per_query,
+        max_total_results=request.max_total_results,
+    )
 
-    # Persist the collected papers
+    # Persist the run and its papers; without this the run_id is useless.
     try:
-        from app.storage.relational.database import get_db_pool
-        from app.storage.repositories.paper_repository import PaperRepository
-        
+        from app.storage.relational.database import get_db_pool  # noqa: PLC0415
+        from app.storage.repositories.paper_repository import PaperRepository  # noqa: PLC0415
+
         pool = await get_db_pool()
-        repo = PaperRepository(pool)
-        await repo.save_collection_result(result, request.query)
-        
-        # Run deduplication on the corpus
-        from app.ingestion.deduplication.service import Deduplicator  # noqa: PLC0415
-        deduplicator = Deduplicator(pool)
-        stats = await deduplicator.run()
-        logger.info("Deduplication after collection", extra=stats)
-    except Exception as exc:
+        await PaperRepository(pool).save_collection_result(result, question, query_id=request.query_id)
+    except Exception as exc:  # noqa: BLE001
         logger.error(
             "Failed to persist collection result to Supabase",
-            extra={"error": str(exc), "query_id": rq.query_id}
+            extra={"error": str(exc), "query_id": rq.query_id},
         )
+        raise ServiceUnavailableError(f"Collection succeeded but could not be saved: {exc}") from exc
+
+    try:
+        from app.ingestion.deduplication.service import Deduplicator  # noqa: PLC0415
+
+        stats = await Deduplicator(pool).run()
+        logger.info("Deduplication after collection", extra=stats)
+    except Exception as exc:  # noqa: BLE001 - the run is saved; duplicates can be merged later
+        logger.error("Deduplication after collection failed", extra={"error": str(exc)})
 
     papers_resp = []
     for cp in result.papers:
@@ -483,6 +590,8 @@ async def collect_literature(request: CollectRequest) -> CollectResponse:
     return CollectResponse(
         status=result.status,
         run_id=rq.query_id,
+        query_id=request.query_id,
+        capped=result.capped,
         queries_searched=result.queries_searched,
         providers_used=result.providers_used,
         total_results=result.total_collected,
@@ -577,7 +686,8 @@ async def _build_retrieval_service(run_id: str, with_dense: bool) -> Any:
     Load the run's corpus (PaperChunks, embeddings, BM25 index) and build
     a RetrievalService over it.
 
-    Dense retrieval is enabled only when an embedding API key is configured.
+    Dense retrieval is enabled when an embedding provider is configured.
+    The corpus is cached per run (see app.retrieval.corpus_cache).
     """
     from fastapi import HTTPException  # noqa: PLC0415
 
@@ -595,17 +705,24 @@ async def _build_retrieval_service(run_id: str, with_dense: bool) -> Any:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found.")
 
     embedding_provider = None
-    if with_dense and settings.EMBEDDING_API_KEY:
-        from app.providers.embeddings.factory import create_embedding_provider  # noqa: PLC0415
+    from app.providers.embeddings.factory import (  # noqa: PLC0415
+        create_embedding_provider,
+        embedding_provider_configured,
+    )
+
+    if with_dense and embedding_provider_configured():
 
         embedding_provider = create_embedding_provider()
+
+    from app.retrieval import corpus_cache  # noqa: PLC0415
 
     loader = RunCorpusLoader(
         paper_repo=paper_repo,
         storage_client=SupabaseStorageClient(),
         embedding_repo=EmbeddingRepository(pool) if embedding_provider is not None else None,
     )
-    corpus = await loader.load(run_id)
+    model = embedding_provider.get_model_name() if embedding_provider is not None else None
+    corpus = await corpus_cache.get_or_load(run_id, model, lambda: loader.load(run_id))
     if not corpus.get_all_chunks():
         raise HTTPException(
             status_code=409,
@@ -617,10 +734,28 @@ async def _build_retrieval_service(run_id: str, with_dense: bool) -> Any:
     return RetrievalService(corpus, embedding_provider=embedding_provider)
 
 
+def _filters_from(request: RetrieveFilterFields) -> Any:
+    from app.core.exceptions import BadRequestError  # noqa: PLC0415
+    from app.retrieval.filters import RetrievalFilters  # noqa: PLC0415
+
+    if request.year_from is not None and request.year_to is not None and request.year_from > request.year_to:
+        raise BadRequestError("year_from must be <= year_to.")
+    return RetrievalFilters.build(
+        section_types=request.section_types,
+        paper_ids=request.paper_ids,
+        year_from=request.year_from,
+        year_to=request.year_to,
+        exclude_noise=not request.include_noise,
+    )
+
+
 async def _run_retrieval(request: RetrieveRequest, method: str) -> RetrieveResponse:
     _validate_retrieve_request(request)
+    filters = _filters_from(request)
     service = await _build_retrieval_service(request.run_id, with_dense=method != "sparse")
-    results = await service.aretrieve(query=request.query, top_k=request.top_k, method=method)
+    results = await service.aretrieve(
+        query=request.query, top_k=request.top_k, method=method, filters=filters
+    )
     return _build_retrieve_response(request, results)
 
 
@@ -634,7 +769,7 @@ async def retrieve_dense(request: RetrieveRequest) -> RetrieveResponse:
     Run semantic dense retrieval over the run's chunks.
 
     Embeds the query and ranks the run's chunks by cosine similarity to
-    their stored embeddings (from /represent).  Requires EMBEDDING_API_KEY.
+    their stored embeddings (from /represent).  Requires a configured embedding provider.
     """
     return await _run_retrieval(request, "dense")
 
@@ -666,6 +801,58 @@ async def retrieve_hybrid(request: RetrieveRequest) -> RetrieveResponse:
     key is configured.
     """
     return await _run_retrieval(request, "hybrid")
+
+
+@router.post(
+    "/retrieve/multi",
+    response_model=RetrieveResponse,
+    summary="Multi-query retrieval (question + expansions, RRF-fused)",
+)
+async def retrieve_multi(request: MultiRetrieveRequest) -> RetrieveResponse:
+    """
+    Retrieve for several queries and fuse the ranked lists with Reciprocal
+    Rank Fusion.  With ``query_id`` the stored question and all its expanded
+    queries from /query are used.  Each result's metadata lists the queries
+    that matched it (``matched_queries``).
+    """
+    from app.core.exceptions import BadRequestError, NotFoundError  # noqa: PLC0415
+
+    if not request.run_id or not request.run_id.strip():
+        raise BadRequestError("run_id must be a non-empty string.")
+    if request.method not in ("dense", "sparse", "hybrid"):
+        raise BadRequestError("method must be one of: dense, sparse, hybrid.")
+    if not isinstance(request.top_k, int) or request.top_k < 1 or request.top_k > 100:
+        raise BadRequestError("top_k must be an integer between 1 and 100.")
+
+    queries = [q for q in request.queries if q and q.strip()]
+    if request.query_id:
+        stored = await _load_query_run(request.query_id)
+        if stored is None:
+            raise NotFoundError(f"query_id '{request.query_id}' not found.")
+        queries = queries or _search_queries(stored["research_question"], stored["expanded_queries"])
+    if not queries:
+        raise BadRequestError("Give queries or a query_id.")
+
+    filters = _filters_from(request)
+    service = await _build_retrieval_service(request.run_id, with_dense=request.method != "sparse")
+    results = await service.aretrieve_many(
+        queries, top_k=request.top_k, method=request.method, filters=filters
+    )
+    return RetrieveResponse(
+        run_id=request.run_id,
+        query=" | ".join(queries),
+        top_k=request.top_k,
+        total_results=len(results),
+        results=[
+            RetrieveResultItem(
+                chunk_id=r.chunk_id, paper_id=r.paper_id, section=r.section,
+                section_type=r.section_type, page_start=r.page_start, page_end=r.page_end,
+                text=r.text, score=r.score, rank=r.rank,
+                retrieval_method=r.retrieval_method, metadata=r.metadata,
+            )
+            for r in results
+        ],
+    )
 
 
 @router.post("/gaps", response_model=GapsResponse, summary="Retrieve detected gaps")

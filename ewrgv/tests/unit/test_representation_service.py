@@ -187,3 +187,20 @@ async def test_run_representation_partial_failure(service, mocks):
         assert job.embedding_status == "FAILED"
         assert job.failed_chunks == 2
         assert job.bm25_status == "INDEXED" # BM25 still builds from chunks even if embeddings fail
+
+
+@pytest.mark.asyncio
+async def test_run_representation_prunes_stale_embeddings(service, mocks):
+    """After re-chunking, vectors of chunk_ids that no longer exist are deleted."""
+    provider, embedding_repo, paper_repo, storage_client = mocks
+    provider.get_model_name = MagicMock(return_value=DUMMY_MODEL)  # sync on the real provider
+    embedding_repo.get_embedded_chunk_ids.return_value = {"chunk0", "old-a", "old-b"}
+    provider.embed_documents.return_value = [[0.4, 0.5, 0.6]]  # only chunk1 is new
+    job = RepresentationJob(job_id="job1", run_id=DUMMY_RUN_ID)
+
+    with patch("app.ingestion.representation.service.BM25Index.save"):
+        await service.run_representation_for_run(DUMMY_RUN_ID, job)
+
+    embedding_repo.delete_embeddings.assert_awaited_once_with(["old-a", "old-b"], DUMMY_MODEL)
+    args, _ = provider.embed_documents.call_args
+    assert args[0] == ["This is chunk 1"]

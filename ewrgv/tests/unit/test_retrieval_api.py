@@ -309,6 +309,9 @@ class TestBuildRetrievalService:
 
     @pytest.fixture
     def deps(self, monkeypatch):
+        from app.retrieval import corpus_cache
+
+        corpus_cache.clear()
         import app.ingestion.corpus.run_corpus as run_corpus_mod
         import app.storage.relational.database as database
         import app.storage.repositories.paper_repository as paper_repo_mod
@@ -325,6 +328,7 @@ class TestBuildRetrievalService:
         monkeypatch.setattr(paper_repo_mod, "PaperRepository", MagicMock(return_value=repo))
         monkeypatch.setattr(storage_mod, "SupabaseStorageClient", MagicMock())
         monkeypatch.setattr(run_corpus_mod, "RunCorpusLoader", loader_cls)
+        monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "openai", raising=False)
         monkeypatch.setattr(settings, "EMBEDDING_API_KEY", "", raising=False)
         return repo, loader, loader_cls
 

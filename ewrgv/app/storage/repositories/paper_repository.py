@@ -5,6 +5,7 @@ Repository for persisting collected papers to Supabase PostgreSQL.
 """
 
 import json
+from typing import Optional
 from asyncpg import Pool
 from app.core.logging import get_logger
 from app.domain.models.collection import CollectionResult
@@ -18,18 +19,24 @@ class PaperRepository:
     def __init__(self, db_pool: Pool):
         self._pool = db_pool
 
-    async def save_collection_result(self, result: CollectionResult, research_question: str) -> None:
+    async def save_collection_result(
+        self,
+        result: CollectionResult,
+        research_question: str,
+        query_id: Optional[str] = None,
+    ) -> None:
         """
         Persists a CollectionResult into `research_runs`, `papers`, and `paper_sources` tables.
         Uses an upsert strategy for `papers` based on DOI if present.
-        """
-        if not result.papers:
-            return
 
+        The research_runs row is written even when nothing was found, so the
+        returned run_id is always valid.  ``query_id`` links the run to its
+        stored /query result (query_runs).
+        """
         query_runs = """
-            INSERT INTO research_runs (run_id, research_question)
-            VALUES ($1, $2)
-            ON CONFLICT (run_id) DO NOTHING
+            INSERT INTO research_runs (run_id, research_question, query_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (run_id) DO UPDATE SET query_id = COALESCE(EXCLUDED.query_id, research_runs.query_id)
         """
 
         query_papers = """
@@ -56,7 +63,7 @@ class PaperRepository:
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 # Persist the research run record
-                await conn.execute(query_runs, result.query_id, research_question)
+                await conn.execute(query_runs, result.query_id, research_question, query_id)
 
                 for cp in result.papers:
                     paper = cp.paper

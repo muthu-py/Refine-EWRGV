@@ -117,12 +117,16 @@ class CollectionResult(BaseModel):
         * ``"failed"``   – all providers failed; no papers collected
     total_collected:
         Convenience count: ``len(papers)``.
+    capped:
+        True when ``max_total_results`` stopped collection early, i.e. some
+        query / provider combinations were not searched (fully).
     """
 
     query_id: str
     queries_searched: list[str] = Field(default_factory=list)
     providers_used: list[str] = Field(default_factory=list)
     papers: list[CollectedPaper] = Field(default_factory=list)
+    capped: bool = False
     provider_errors: list[dict] = Field(default_factory=list)
     status: str = "success"
 
