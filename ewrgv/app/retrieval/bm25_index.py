@@ -185,6 +185,11 @@ class BM25Index:
         return instance
 
     @property
+    def chunk_ids(self) -> list[str]:
+        """IDs of the indexed chunks, in index order."""
+        return list(self._chunk_ids)
+
+    @property
     def size(self) -> int:
         """Return the number of indexed chunks."""
         return len(self._chunk_ids)

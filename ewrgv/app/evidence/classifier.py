@@ -1,7 +1,7 @@
 """
 app/evidence/classifier.py
 ---------------------------
-Evidence classifier: assigns an EvidenceType to a DocumentChunk relative to a gap.
+Evidence classifier: assigns an EvidenceType to a PaperChunk relative to a gap.
 
 Satisfies the EvidenceClassifier interface (app.domain.interfaces).
 
@@ -13,7 +13,7 @@ from __future__ import annotations
 from app.core.logging import get_logger
 from app.domain.enums import EvidenceType
 from app.domain.models.candidate_gap import CandidateGap
-from app.domain.models.paper import DocumentChunk
+from app.domain.models.paper_chunk import PaperChunk
 
 logger = get_logger(__name__)
 
@@ -31,7 +31,7 @@ class LLMEvidenceClassifier:
     def __init__(self, llm_provider: object) -> None:
         self._llm = llm_provider
 
-    def classify(self, gap: CandidateGap, chunk: DocumentChunk) -> EvidenceType:
+    def classify(self, gap: CandidateGap, chunk: PaperChunk) -> EvidenceType:
         """Classify a chunk relative to the gap. NOT YET IMPLEMENTED."""
         logger.warning("LLMEvidenceClassifier.classify is not yet implemented.")
         return EvidenceType.INSUFFICIENT

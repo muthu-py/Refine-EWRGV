@@ -6,7 +6,7 @@ Reciprocal Rank Fusion (RRF) for combining multiple retrieval results.
 Combines results from:
     - Dense (semantic) retrieval
     - Sparse (BM25) retrieval
-    - Knowledge Graph retrieval
+    - (optional) a third ranked retriever, e.g. knowledge-graph retrieval
 
 RRF Formula
 -----------
@@ -17,9 +17,8 @@ RRF Formula
     - rank_i(d) is the 1-based rank of document d in ranked list i
     - the sum is over all ranked lists that contain document d
 
-RRF is used because the three retrieval methods produce scores on
-fundamentally different scales (cosine similarity vs BM25 vs KG
-connection strength).  RRF normalises this by using rank positions only.
+RRF is used because the retrieval methods produce scores on
+fundamentally different scales (cosine similarity vs BM25).  RRF normalises this by using rank positions only.
 
 Reference:
     Cormack, G. V., Clarke, C. L. A., & Buettcher, S. (2009).
@@ -115,7 +114,7 @@ def reciprocal_rank_fusion_results(
     Merge multiple RetrievalResult lists using Reciprocal Rank Fusion.
 
     This is the primary fusion function for combining dense, sparse, and
-    KG retrieval results into a single unified result list.
+    (optional) third-retriever results into a single unified result list.
 
     Parameters
     ----------
@@ -175,15 +174,13 @@ def reciprocal_rank_fusion_results(
         merged_metadata["rrf_k"] = k
 
         results.append(
-            RetrievalResult(
-                chunk_id=cid,
-                paper_id=source.paper_id,
-                section=source.section,
-                text=source.text,
-                score=rrf_score,
-                rank=rank + 1,
-                retrieval_method="hybrid",
-                metadata=merged_metadata,
+            source.model_copy(
+                update={
+                    "score": rrf_score,
+                    "rank": rank + 1,
+                    "retrieval_method": "hybrid",
+                    "metadata": merged_metadata,
+                }
             )
         )
 
@@ -192,9 +189,10 @@ def reciprocal_rank_fusion_results(
 
 class HybridRetriever:
     """
-    Combines Dense, Sparse, and Knowledge Graph retrieval via RRF.
+    Combines Dense and Sparse retrieval (plus an optional third ranked
+    retriever) via RRF.
 
-    Composes three retrievers and fuses their results using Reciprocal
+    Composes the retrievers and fuses their results using Reciprocal
     Rank Fusion.  Each retriever is called independently with its own
     top_k, and the fused results are trimmed to the final top_k.
 
@@ -206,7 +204,8 @@ class HybridRetriever:
         Must have a ``retrieve_results(query, top_k)`` method.
     kg_retriever:
         Must have a ``retrieve_results(query, top_k)`` method.
-        May be None if KG retrieval is not available.
+        Optional third retriever (e.g. a future knowledge-graph retriever).
+        May be None.
     top_k:
         Default number of final results to return.
     rrf_k:
@@ -265,12 +264,12 @@ class HybridRetriever:
             result_lists.append(sparse_results)
             logger.debug("HybridRetriever: sparse returned %d results", len(sparse_results))
 
-        # KG retrieval (optional)
+        # Optional third retriever
         if self._kg is not None:
             kg_results = self._kg.retrieve_results(query, self._per_k)
             if kg_results:
                 result_lists.append(kg_results)
-                logger.debug("HybridRetriever: KG returned %d results", len(kg_results))
+                logger.debug("HybridRetriever: third retriever returned %d results", len(kg_results))
 
         if not result_lists:
             logger.warning("HybridRetriever: no results from any retriever")

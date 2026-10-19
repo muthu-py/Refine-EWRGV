@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from app.core.logging import get_logger
 from app.domain.models.candidate_gap import CandidateGap
-from app.domain.models.paper import DocumentChunk
+from app.domain.models.paper_chunk import PaperChunk
 
 logger = get_logger(__name__)
 
@@ -33,7 +33,7 @@ class CounterEvidenceSearch:
     def __init__(self, retriever: object) -> None:
         self._retriever = retriever
 
-    def search(self, gap: CandidateGap, queries: list[str]) -> list[DocumentChunk]:
+    def search(self, gap: CandidateGap, queries: list[str]) -> list[PaperChunk]:
         """
         Search specifically for evidence that contradicts the gap claim.
         NOT YET IMPLEMENTED.

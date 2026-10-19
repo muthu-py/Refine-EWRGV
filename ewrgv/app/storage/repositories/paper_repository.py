@@ -410,6 +410,29 @@ class PaperRepository:
         async with self._pool.acquire() as conn:
             await conn.execute(query, status, paper_id)
 
+    async def get_papers_for_corpus(self, run_id: str) -> list[dict]:
+        """
+        Fetches the chunked papers of a run with the bibliographic fields
+        needed by retrieval and gap detection (title, year, DOI, authors).
+        """
+        query = """
+            SELECT DISTINCT
+                p.paper_id,
+                p.title,
+                p.abstract,
+                p.doi,
+                p.publication_year,
+                p.authors,
+                p.chunks_storage_path
+            FROM papers p
+            JOIN paper_sources ps ON ps.paper_id = p.paper_id
+            WHERE ps.run_id = $1
+              AND p.chunk_status = 'CHUNKED'
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, run_id)
+            return [dict(r) for r in rows]
+
     # ------------------------------------------------------------------ #
     # Phase 2.8 — Corpus Health & Consistency
     # ------------------------------------------------------------------ #

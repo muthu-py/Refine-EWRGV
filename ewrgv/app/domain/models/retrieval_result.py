@@ -3,7 +3,7 @@ app/domain/models/retrieval_result.py
 --------------------------------------
 Unified domain model for retrieval results.
 
-All retrieval methods (dense, sparse, knowledge graph, hybrid/fusion)
+All retrieval methods (dense, sparse, hybrid/fusion)
 return instances of RetrievalResult.  This keeps downstream consumers
 (gap detection, validation, API) decoupled from retrieval internals.
 
@@ -28,6 +28,10 @@ class RetrievalResult(BaseModel):
         Identifier of the parent paper.
     section:
         The section heading this chunk was extracted from.
+    section_type:
+        The chunk's SectionType value (e.g. ``"LIMITATIONS"``).
+    page_start, page_end:
+        PDF page range of the chunk.
     text:
         The actual text content of the chunk.
     score:
@@ -36,11 +40,10 @@ class RetrievalResult(BaseModel):
         1-based rank within the result list.
     retrieval_method:
         Which retrieval method produced this result:
-        ``"dense"``, ``"sparse"``, ``"knowledge_graph"``, or ``"hybrid"``.
+        ``"dense"``, ``"sparse"``, or ``"hybrid"``.
     metadata:
         Optional extra information.  May include:
-        - ``matched_entities``: list of KG entities matched (KG retrieval)
-        - ``relation``: KG relationship label (KG retrieval)
+        - ``title``, ``publication_year``, ``doi``: paper bibliographic fields
         - ``contributing_methods``: list of methods that contributed (hybrid)
         - ``source``: provenance detail
         - ``explanation``: human-readable scoring rationale
@@ -49,6 +52,9 @@ class RetrievalResult(BaseModel):
     chunk_id: str
     paper_id: str
     section: str = ""
+    section_type: str = ""
+    page_start: int = 0
+    page_end: int = 0
     text: str = ""
     score: float = 0.0
     rank: int = 0

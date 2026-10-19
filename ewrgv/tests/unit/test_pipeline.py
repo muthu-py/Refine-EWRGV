@@ -19,13 +19,21 @@ import pytest
 from app.core.exceptions import GapDetectionError, RetrievalError
 from app.domain.enums import PipelineStage
 from app.domain.models.candidate_gap import CandidateGap
-from app.domain.models.paper import DocumentChunk
+from app.domain.models.paper_chunk import PaperChunk
 from app.domain.models.query import ResearchQuery
 from app.domain.models.retrieval_result import RetrievalResult
 from app.gap_detection.detector import GapDetector
 from app.gap_detection.ranking import CandidateRanker
 from app.orchestration.research_pipeline import PipelineResult, ResearchPipeline
 from app.query_understanding.service import QueryUnderstandingService
+from app.retrieval.service import RetrievalService
+from tests.fixtures.sample_corpus import FakeEmbeddingProvider, make_sample_corpus
+from tests.fixtures.sample_data import make_chunk
+
+
+def _hybrid_factory(corpus):
+    """Dense + BM25 hybrid over the run corpus with a deterministic embedder."""
+    return RetrievalService(corpus, FakeEmbeddingProvider())
 
 
 class _NullObject:
@@ -159,9 +167,11 @@ class TestPipelineGapStages:
 
         chunks = detector.detect.call_args.args[1]
         assert [c.chunk_id for c in chunks] == ["c1", "c2"]
-        assert all(isinstance(c, DocumentChunk) for c in chunks)
-        assert chunks[0].metadata["retrieval_method"] == "hybrid"
+        assert all(isinstance(c, PaperChunk) for c in chunks)
+        assert chunks[0].section_title == "Limitations"
         assert result.retrieved_chunks == chunks
+        assert result.retrieval_provenance["c1"]["retrieval_method"] == "hybrid"
+        assert result.retrieval_provenance["c2"]["retrieval_rank"] == 2
 
     def test_retrieves_for_original_and_expanded_queries_and_dedupes(self):
         query = ResearchQuery(query="orig", expanded_queries=["exp1", "orig", "exp2"])
@@ -238,14 +248,11 @@ class TestPipelineGapStages:
         assert "index broken" in result.error
         detector.detect.assert_not_called()
 
-    def test_end_to_end_on_stub_corpus_with_mocked_llm(self):
+    def test_end_to_end_on_run_corpus_with_mocked_llm(self):
         """
-        Real RetrievalService (stub corpus) + real GapDetector/CandidateRanker,
-        with only the LLM mocked.  Exercises the stub corpus only — this is
-        NOT evidence that detection works on collected papers.
+        Real hybrid retrieval over a RunCorpus of PaperChunks + real
+        GapDetector/CandidateRanker, with only the LLM mocked.
         """
-        from app.retrieval.service import RetrievalService
-
         llm = MagicMock()
         llm.complete_structured.return_value = {
             "candidate_gaps": [
@@ -259,13 +266,15 @@ class TestPipelineGapStages:
             ]
         }
         pipeline = self._make_pipeline(
-            retriever=RetrievalService(),
+            retriever=None,
             detector=GapDetector(llm),
+            retriever_factory=_hybrid_factory,
         )
 
-        result = pipeline.run("What are the limitations of GPT-3?")
+        result = pipeline.run("What are the limitations of GPT-3?", corpus=make_sample_corpus())
 
         assert result.stage_reached == PipelineStage.CANDIDATE_RANKING
+        assert result.corpus_source == "run_corpus"
         assert "chunk-003-limits" in {c.chunk_id for c in result.retrieved_chunks}
         assert len(result.top_k_gaps) == 1
         gap = result.top_k_gaps[0]
@@ -292,11 +301,11 @@ class TestPipelineGapStagesCoverage:
             **kwargs,
         )
 
-    def test_plain_document_chunks_pass_through_unchanged(self):
-        """Retrievers satisfying the domain Retriever protocol return DocumentChunk."""
+    def test_plain_paper_chunks_pass_through_unchanged(self):
+        """Retrievers satisfying the domain Retriever protocol return PaperChunk."""
         original = [
-            DocumentChunk(chunk_id="d1", paper_id="p1", text="t1", metadata={"k": "v"}),
-            DocumentChunk(chunk_id="d2", paper_id="p2", text="t2"),
+            make_chunk(chunk_id="d1", paper_id="p1", text="t1"),
+            make_chunk(chunk_id="d2", paper_id="p2", text="t2"),
         ]
         retriever = MagicMock()
         retriever.retrieve.return_value = original
@@ -308,31 +317,30 @@ class TestPipelineGapStagesCoverage:
         passed = detector.detect.call_args.args[1]
         assert [c.chunk_id for c in passed] == ["d1", "d2"]
         assert passed[0] is original[0]  # no copy, no conversion
-        assert passed[0].metadata == {"k": "v"}  # no retrieval_* keys added
         assert result.retrieved_chunks == original
+        # PaperChunks carry no score; only the query that found them is recorded.
+        assert result.retrieval_provenance == {"d1": {"query": "q"}, "d2": {"query": "q"}}
 
     def test_mixed_result_types_merged(self):
         retriever = MagicMock()
         retriever.retrieve.return_value = [
-            DocumentChunk(chunk_id="d1", paper_id="p1", text="t1"),
+            make_chunk(chunk_id="d1", paper_id="p1", text="t1"),
             _result("r1", rank=2),
         ]
         detector = MagicMock()
         detector.detect.return_value = []
 
-        self._make_pipeline(retriever, detector).run("q")
+        result = self._make_pipeline(retriever, detector).run("q")
 
         passed = detector.detect.call_args.args[1]
-        assert [type(c) for c in passed] == [DocumentChunk, DocumentChunk]
-        assert passed[1].metadata["retrieval_rank"] == 2
+        assert [type(c) for c in passed] == [PaperChunk, PaperChunk]
+        assert result.retrieval_provenance["r1"]["retrieval_rank"] == 2
 
-    def test_real_dense_retriever_returning_document_chunks(self):
+    def test_real_dense_retriever_returning_paper_chunks(self):
         from app.retrieval.semantic import DenseRetriever
-        from app.stubs.stub_corpus import StubCorpusStore
-        from app.stubs.stub_text_representation import StubEmbeddingProvider
 
         dense = DenseRetriever(
-            embedding_provider=StubEmbeddingProvider(), corpus_store=StubCorpusStore()
+            embedding_provider=FakeEmbeddingProvider(), corpus_store=make_sample_corpus()
         )
         detector = MagicMock()
         detector.detect.return_value = []
@@ -341,20 +349,15 @@ class TestPipelineGapStagesCoverage:
 
         assert result.stage_reached == PipelineStage.CANDIDATE_RANKING
         assert len(result.retrieved_chunks) == 4
-        assert all(isinstance(c, DocumentChunk) for c in result.retrieved_chunks)
+        assert all(isinstance(c, PaperChunk) for c in result.retrieved_chunks)
 
-    def test_end_to_end_stub_retrieval_with_small_top_k(self):
+    def test_end_to_end_run_corpus_retrieval_with_small_top_k(self):
         """
-        Real hybrid retrieval over the stub corpus with retrieval_top_k=3, so
-        only part of the 13-chunk corpus reaches the detector.  Grounding must
-        be against the *retrieved* chunks: citations of chunks that exist in
-        the corpus but were not retrieved are rejected.
-
-        Exercises the stub corpus only — NOT evidence that detection works on
-        collected papers.
+        Real hybrid retrieval over the sample RunCorpus with retrieval_top_k=3,
+        so only part of the 13-chunk corpus reaches the detector.  Grounding
+        must be against the *retrieved* chunks: citations of chunks that exist
+        in the corpus but were not retrieved are rejected.
         """
-        from app.retrieval.service import RetrievalService
-
         query = ResearchQuery(
             query="GPT-3 limitations structured prediction reasoning",
             expanded_queries=["repetitive text generation"],
@@ -378,10 +381,11 @@ class TestPipelineGapStagesCoverage:
             ]
         }
         pipeline = self._make_pipeline(
-            RetrievalService(), GapDetector(llm), query=query, retrieval_top_k=3
+            None, GapDetector(llm), query=query, retrieval_top_k=3,
+            retriever_factory=_hybrid_factory,
         )
 
-        result = pipeline.run(query.query)
+        result = pipeline.run(query.query, corpus=make_sample_corpus())
 
         # rank-1 hits of both queries first, then the best rank-2 hit; capped at 3
         assert [c.chunk_id for c in result.retrieved_chunks] == [

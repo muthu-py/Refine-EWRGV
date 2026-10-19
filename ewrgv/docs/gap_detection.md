@@ -8,35 +8,33 @@
 | `GapRepresentationBuilder` (`app/gap_detection/representation.py`) | ✅ Implemented |
 | `CandidateRanker` (`app/gap_detection/ranking.py`) | ✅ Implemented (deterministic heuristic; blends in evidence scores when present) |
 | `CandidateEvidenceScorer` (`app/gap_detection/evidence_scoring.py`) | ✅ Implemented, opt-in (Stage 6b): pre-validation evidence-weighted score — **not** validation (see [Evidence-weighted candidate scoring](#evidence-weighted-candidate-scoring)) |
-| Pipeline Stage 3 — collection-backed corpus (`app/ingestion/corpus/collection_corpus.py`) | ✅ Abstract level only: one title + abstract chunk per unique collected paper (no PDF full text) |
-| Pipeline Stages 4, 6, 7 (`app/orchestration/research_pipeline.py`) | ✅ Wired (Stage 4 uses BM25 over the collected corpus when a collection ran, else the injected retriever) |
+| Pipeline Stage 3 — run corpus (`app/ingestion/corpus/run_corpus.py`) | ✅ Full-text PaperChunks from `/chunks` (`chunks.json`), with stored embeddings and the BM25 index from `/represent` |
+| Pipeline Stages 4, 6, 7 (`app/orchestration/research_pipeline.py`) | ✅ Wired (Stage 4 retrieves from the run corpus; BM25 by default, hybrid with an injected factory) |
 | `POST /api/v1/research/gaps` | 🔲 Unchanged placeholder (see [API exposure](#api-exposure)) |
 
-> ⚠️ **Collected papers are used at abstract level only.**
-> When Stage 2 produces a `CollectionResult`, Stage 3 builds a
-> `CollectionCorpusStore` (`app/ingestion/corpus/collection_corpus.py`): one
-> title + abstract chunk per unique paper; papers without an abstract get no
-> chunk. Duplicates are merged like the database deduplicator: records sharing
-> any signature — normalised DOI, title + author words + year, or
-> provider + provider ID — are merged transitively, keeping the longest
-> abstract and filling missing DOI/year/authors from the other records.
-> (Known shared limitation: author-name format or year differences without a
-> common DOI/provider ID keep records apart.) Stage 4 retrieves from it with
-> BM25, and the stub corpus is **not** used. If the collected corpus has no
-> usable abstracts (empty or failed collection, or no abstracts), the run stops
-> at `DOCUMENT_PROCESSING` with `PipelineResult.error` explaining why — including
-> the provider-error count and the first provider error (credentials redacted,
-> truncated to 200 characters). Corpus-construction, retriever-factory and
-> unexpected retrieval failures end the run as `FAILED`, with the exception type
-> and message in `error` and the traceback in the log.
-> Without a collection (no `LiteratureCollectionService` injected), Stage 4 uses
-> the injected retriever (the stub corpus in development) as before.
-> `PipelineResult.corpus_source` / `corpus_stats` show which path ran.
+> **Corpus.** Gap detection runs on the run's `RunCorpus`: the section-aware,
+> page-located `PaperChunk`s written by /acquire → /parse → /sections →
+> /chunks, plus embeddings and the BM25 index from /represent.  Those phases
+> are background jobs, so the corpus is passed in — `run(query, corpus=...)`,
+> `run_on_corpus(query, corpus)`, or a `corpus_loader(run_id)` called after
+> Stage 2 (e.g. wrapping `RunCorpusLoader.load`).
 >
-> PDF full text (parsing → sectioning → chunking) is **not** implemented, so
-> Limitations / Future Work sections — the strongest gap signals — are not yet
-> seen. This path is tested offline with hand-written fictional abstracts only;
-> it has not been run against live provider results or a real LLM.
+> * If a collection ran but no corpus is available, the run stops after
+>   Stage 2 with `PipelineResult.error` listing the processing steps (and the
+>   provider-error summary).  The injected retriever is **not** used then, so
+>   gaps never come from papers outside the run.
+> * An empty corpus (no chunked papers) stops at `DOCUMENT_PROCESSING`.
+> * Corpus-loading, retriever-factory and unexpected retrieval failures end the
+>   run as `FAILED`, with the exception type and message in `error` and the
+>   traceback in the log.
+> * Without a collection or corpus, Stage 4 uses the injected retriever.
+>
+> `PipelineResult.corpus_source` (`run_corpus` / `injected_retriever`) and
+> `corpus_stats` show which path ran.  Because chunks carry `section_type`,
+> Limitations / Future Work / Discussion / Conclusion passages — the strongest
+> gap signals — are labelled as such in the detection prompt and in evidence
+> scoring.  This path is tested offline with hand-written fictional chunks; it
+> has not been run against a real LLM.
 
 No test in this phase calls a real LLM; all detector tests use a mocked
 `LLMProvider`. Prompt quality against a real model has not been evaluated.
@@ -50,8 +48,9 @@ ResearchQuery (+ QueryUnderstanding from Phase 2.1)
         ↓
 Stage 4  retriever.retrieve(q) for the original query + each expanded query
         ↓   merge: best rank first, de-duplicate by chunk_id, cap at retrieval_top_k
-        ↓   RetrievalResult → DocumentChunk (scores kept in chunk metadata)
-DocumentChunk[]
+        ↓   each hit resolved to the corpus's PaperChunk (hits outside the corpus dropped);
+        ↓   score / rank / method / query kept in PipelineResult.retrieval_provenance
+PaperChunk[]
         ↓
 Stage 6  GapDetector.detect(query, chunks)
         ↓   ONE structured LLM call → GapDetectionLLMOutput (Pydantic-validated)
@@ -214,22 +213,20 @@ unchanged and remains responsible for deciding whether a gap is genuine.
 | Feature | Definition | Data used |
 |---|---|---|
 | relevance | per passage: share of gap terms (statement + key concepts, Unicode word tokens, English stop words removed) found in the passage; candidate = mean | passage text |
-| quality | per **supporting** passage only: 1.0 if its section heading contains any of `limitation`, `future work`, `future direction`, `discussion`, `conclusion`, `open problem`, `open challenge`, `threats to validity` (case-insensitive substring match, e.g. "Limitations and Future Directions"), else 0.5 (both values and the list are configurable); candidate = mean. Counter-evidence passages get no quality value | section heading |
-| recency | per passage: `max(0, 1 − max(0, reference_year − year) / 10)` — 1.0 for a paper from the reference year, decreasing by 0.1 per year older, 0 at 10+ years; a paper **newer** than the reference year (possible only with an explicit `reference_year`) is capped at 1.0. Candidate = mean over passages with a year; **unavailable** if none have a year | chunk `publication_year` metadata, else the paper (via corpus lookup) |
+| quality | per **supporting** passage only: 1.0 if the chunk's `section_type` is LIMITATIONS, FUTURE_WORK, DISCUSSION or CONCLUSION; for UNKNOWN/OTHER types, 1.0 if the section heading contains any of `limitation`, `future work`, `future direction`, `discussion`, `conclusion`, `open problem`, `open challenge`, `threats to validity` (case-insensitive substring); else 0.5 (values and heading list configurable); candidate = mean. Counter-evidence passages get no quality value | `PaperChunk.section_type`, else heading |
+| recency | per passage: `max(0, 1 − max(0, reference_year − year) / 10)` — 1.0 for a paper from the reference year, decreasing by 0.1 per year older, 0 at 10+ years; a paper **newer** than the reference year (possible only with an explicit `reference_year`) is capped at 1.0. Candidate = mean over passages with a year; **unavailable** if none have a year | the paper's `publication_year` (via the corpus paper lookup) |
 | independence | `min(distinct supporting papers / 3, 1)` | paper IDs (after corpus de-duplication) |
 
 **Reference year.** If `reference_year` is configured (a positive integer; 0,
 negative, non-integer or boolean values are rejected) it is used. Otherwise one
 reference year is resolved per scoring call: the latest valid publication year
-across **all** chunks supplied to `score_all()` (chunk metadata, else the paper
-lookup), shared by every candidate in that call so their recency — and scores —
+across **all** chunks supplied to `score_all()` (via the paper lookup), shared by every candidate in that call so their recency — and scores —
 are comparable. A standalone `score()` call resolves it the same way from all of
 its `chunks_by_id`. Passages without a year still get no recency (the feature is
 excluded, not set to 0). Results never depend on the wall clock.
 
 Citation counts are **not** scored: they
-are a popularity proxy confounded with paper age, are missing for many papers,
-and are absent for the stub corpus. When a provider supplied one, it is shown on
+are a popularity proxy confounded with paper age, and are missing for many papers. When a provider supplied one, it is shown on
 the evidence item for information only.
 
 ### Formula
@@ -253,9 +250,9 @@ or `{"quality": 1.0}` raise `ValueError`). `contradiction_penalty` defaults to
 1.0. All parameters are constructor arguments and validated.
 
 **Conservative bias toward contradiction.** Supporting passages include the
-section-quality feature (0.5 for an abstract), counter passages do not, so the
+section-quality feature (0.5 outside explicit-gap sections), counter passages do not, so the
 same passage carries more strength as counter evidence than as support (e.g. an
-abstract with full term overlap and the newest year: 1.0 as counter vs 0.857 as
+non-limitation passage with full term overlap and the newest year: 1.0 as counter vs 0.857 as
 support with default weights). This deliberately errs toward discounting a
 candidate gap rather than over-claiming it.
 
@@ -309,10 +306,9 @@ keeping the unscored candidates in `candidate_gaps`.
   good as the detector's judgement, and only retrieved passages can be labelled.
   No dedicated counter-evidence search is run (that belongs to EWRGV
   validation).
-* **Abstract-level evidence**: collected papers currently provide one
-  title + abstract passage each, so quality is usually 0.5 (abstracts are not
-  Limitations sections) and independence is capped by the number of retrieved
-  papers.
+* **Section typing is heuristic**: quality depends on the section classifier
+  (`app/ingestion/sectioning/classifier.py`); a mislabelled heading changes the
+  quality value.  Independence is capped by the number of retrieved papers.
 * **Recency is a heuristic**: a recent limitation statement is treated as more
   likely still open; it is not proof. Recency is relative to the newest paper in
   the scoring call, so scores from different calls (different retrieved sets)
@@ -326,31 +322,41 @@ keeping the unscored candidates in `candidate_gaps`.
 
 ## Pipeline wiring
 
-`ResearchPipeline` gained one optional argument, `retrieval_top_k=20`
-(results per query, and cap on the merged chunk list). No factory in the app
-constructs the pipeline yet; callers build it, e.g.:
+Relevant `ResearchPipeline` arguments: `retrieval_top_k=20` (results per
+query, and cap on the merged chunk list), `retriever_factory(corpus)`
+(default: BM25 via `RetrievalService(corpus)`), `corpus_loader(run_id)` and
+`evidence_scorer`.  No factory in the app constructs the pipeline yet;
+callers build it, e.g.:
 
 ```python
 from app.core.config import settings
 from app.gap_detection.detector import GapDetector
 from app.gap_detection.ranking import CandidateRanker
-from app.retrieval.service import RetrievalService      # stub corpus
+from app.ingestion.corpus.run_corpus import RunCorpusLoader
+from app.retrieval.service import RetrievalService
+
+corpus = await RunCorpusLoader(paper_repo, storage_client, embedding_repo).load(run_id)
 
 pipeline = ResearchPipeline(
     query_understanding_service=qu_service,
     literature_collector=None,
     document_parser=None,
-    retriever=RetrievalService(),           # retrieve(query, top_k) → RetrievalResult[]
+    retriever=None,
     reranker=None,
     gap_detector=GapDetector(llm, max_candidates=settings.MAX_CANDIDATE_GAPS),
     candidate_ranker=CandidateRanker(),
     ewrgv_validator=None,
     top_k_gaps=settings.TOP_K_GAPS,
+    retriever_factory=lambda c: RetrievalService(c, embedding_provider),  # hybrid
 )
+result = pipeline.run(question, corpus=corpus)
 ```
 
-Any retriever whose `retrieve(query, top_k=...)` returns `DocumentChunk`s or
-`RetrievalResult`s works; the pipeline normalises both.
+`RetrievalService.retrieve` is synchronous; inside an event loop, pre-embed
+the expanded queries (or run the pipeline in a worker thread) so the
+embedding provider is not called from the loop.  Any retriever whose
+`retrieve(query, top_k=...)` returns `PaperChunk`s or `RetrievalResult`s
+works; with a corpus, both are resolved to the corpus's PaperChunks.
 
 ---
 
@@ -370,11 +376,11 @@ results with that contract, the following is still needed:
    stores the result, and where (in-memory `JobStore` vs Supabase).
 3. **A mapping** from `CandidateGap` to the `candidate_gaps` dicts (e.g.
    `gap.model_dump(mode="json")`), keeping domain models out of route code.
-4. **Richer and persistent corpus data.** Stage 3 currently builds an in-memory,
-   abstract-only corpus per run with run-local paper IDs (collectors assign
-   random UUIDs, which differ across runs and from the database `paper_id`).
-   Full-text (PDF) chunks and stable / database-backed paper IDs are needed
-   before stored or cross-run results are meaningful.
+4. **Stable chunk IDs.** `PaperChunk.chunk_id` is a random UUID per chunking
+   run, so re-running /chunks changes the IDs that stored gaps cite (the BM25
+   index is rebuilt automatically when this happens, but stored gaps would
+   not be).  Deterministic IDs (e.g. paper_id + section_id + chunk_index)
+   are needed before gaps are persisted.
 
 ---
 
@@ -382,11 +388,12 @@ results with that contract, the following is still needed:
 
 | File | Covers |
 |---|---|
-| `tests/unit/test_gap_detector.py` | valid output, invalid/ungrounded/decorated chunk IDs, empty input, provider/malformed errors, per-candidate validation, type mapping, caps, prompt content, stub-corpus chunks |
+| `tests/unit/test_gap_detector.py` | valid output, invalid/ungrounded/decorated chunk IDs, empty input, provider/malformed errors, per-candidate validation, type mapping, caps, prompt content (incl. section type), run-corpus chunks |
 | `tests/unit/test_gap_detection_schemas.py` | schema coercion, per-candidate validation, strict top level, JSON schema shape |
 | `tests/unit/test_gap_llm_call.py` | shared LLM call: cause preservation (e.g. 429), logging, secret redaction |
 | `tests/unit/test_gap_representation.py` | `from_llm_output`, `build()` success and errors |
 | `tests/unit/test_candidate_ranker.py` | scoring, near-duplicates (incl. Unicode/accents), NaN/inf confidence, diversity, top-k, determinism, config validation, evidence-score blending |
-| `tests/unit/test_candidate_evidence_scoring.py` | evidence scoring: exact formula values, item features, weight configuration (incl. required relevance weight), missing evidence, contradictory and zero-strength counter evidence, recency renormalisation, shared/explicit reference year and its validation, stub-corpus lookup, ranking with evidence |
-| `tests/unit/test_pipeline_collection_corpus.py` (`TestEvidenceScoringInPipeline`) | Stage 6b with/without a scorer, scorer failure |
-| `tests/unit/test_pipeline.py` (`TestPipelineGapStages`, `TestPipelineGapStagesCoverage`) | Stage 4 merge/conversion (both result types), Stage 6/7 wiring, failure handling incl. provider cause, stub-corpus runs with mocked LLM (incl. `retrieval_top_k=3`) |
+| `tests/unit/test_candidate_evidence_scoring.py` | evidence scoring: exact formula values, item features, weight configuration (incl. required relevance weight), missing evidence, contradictory and zero-strength counter evidence, recency renormalisation, shared/explicit reference year and its validation, corpus paper lookup, ranking with evidence |
+| `tests/unit/test_pipeline_run_corpus.py` | collection → corpus_loader → detection, provenance, section types in the prompt, Stage 6b with corpus paper years, hybrid factory, missing/empty corpus, loader/factory/retrieval failures, hits outside the corpus |
+| `tests/unit/test_run_corpus.py` | RunCorpus store, embeddings, lazy BM25; RunCorpusLoader with mocked repos: chunks.json download, skipped papers, embeddings, persisted / stale / unreadable BM25 index |
+| `tests/unit/test_pipeline.py` (`TestPipelineGapStages`, `TestPipelineGapStagesCoverage`) | Stage 4 merge/conversion (both result types), Stage 6/7 wiring, failure handling incl. provider cause, sample-corpus runs with mocked LLM (incl. `retrieval_top_k=3`) |

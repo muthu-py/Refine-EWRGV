@@ -11,7 +11,6 @@ POST /api/v1/research/collect             – Search academic literature
 POST /api/v1/research/acquire             – Start full-text acquisition
 POST /api/v1/research/retrieve/dense      – Dense (semantic) retrieval
 POST /api/v1/research/retrieve/sparse     – Sparse (BM25) retrieval
-POST /api/v1/research/retrieve/knowledge-graph – Knowledge Graph retrieval
 POST /api/v1/research/retrieve/hybrid     – Hybrid (RRF fusion) retrieval
 POST /api/v1/research/gaps               – Trigger gap detection for a query
 POST /api/v1/research/validate           – Trigger EWRGV validation for a gap
@@ -198,6 +197,7 @@ class ValidateResponse(BaseModel):
 
 class RetrieveRequest(BaseModel):
     """Request body for POST /research/retrieve/* endpoints."""
+    run_id: str
     query: str
     top_k: int = 10
 
@@ -207,6 +207,9 @@ class RetrieveResultItem(BaseModel):
     chunk_id: str
     paper_id: str
     section: str = ""
+    section_type: str = ""
+    page_start: int = 0
+    page_end: int = 0
     text: str = ""
     score: float = 0.0
     rank: int = 0
@@ -216,6 +219,7 @@ class RetrieveResultItem(BaseModel):
 
 class RetrieveResponse(BaseModel):
     """Response from POST /research/retrieve/* endpoints."""
+    run_id: str
     query: str
     top_k: int
     total_results: int
@@ -530,19 +534,21 @@ async def start_acquisition(request: AcquireRequest, req: Request) -> AcquireRes
     )
 
 
-def _build_retrieve_response(
-    query: str, top_k: int, results: list,
-) -> RetrieveResponse:
+def _build_retrieve_response(request: RetrieveRequest, results: list) -> RetrieveResponse:
     """Map domain RetrievalResult list to the API response schema."""
     return RetrieveResponse(
-        query=query,
-        top_k=top_k,
+        run_id=request.run_id,
+        query=request.query,
+        top_k=request.top_k,
         total_results=len(results),
         results=[
             RetrieveResultItem(
                 chunk_id=r.chunk_id,
                 paper_id=r.paper_id,
                 section=r.section,
+                section_type=r.section_type,
+                page_start=r.page_start,
+                page_end=r.page_end,
                 text=r.text,
                 score=r.score,
                 rank=r.rank,
@@ -558,10 +564,64 @@ def _validate_retrieve_request(request: RetrieveRequest) -> None:
     """Shared validation for all retrieve endpoints."""
     from app.core.exceptions import BadRequestError  # noqa: PLC0415
 
+    if not request.run_id or not request.run_id.strip():
+        raise BadRequestError("run_id must be a non-empty string.")
     if not request.query or not request.query.strip():
         raise BadRequestError("Query must be a non-empty string.")
     if not isinstance(request.top_k, int) or request.top_k < 1 or request.top_k > 100:
         raise BadRequestError("top_k must be an integer between 1 and 100.")
+
+
+async def _build_retrieval_service(run_id: str, with_dense: bool) -> Any:
+    """
+    Load the run's corpus (PaperChunks, embeddings, BM25 index) and build
+    a RetrievalService over it.
+
+    Dense retrieval is enabled only when an embedding API key is configured.
+    """
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    from app.core.config import settings  # noqa: PLC0415
+    from app.ingestion.corpus.run_corpus import RunCorpusLoader  # noqa: PLC0415
+    from app.retrieval.service import RetrievalService  # noqa: PLC0415
+    from app.storage.relational.database import get_db_pool  # noqa: PLC0415
+    from app.storage.repositories.embedding_repository import EmbeddingRepository  # noqa: PLC0415
+    from app.storage.repositories.paper_repository import PaperRepository  # noqa: PLC0415
+    from app.storage.supabase_storage import SupabaseStorageClient  # noqa: PLC0415
+
+    pool = await get_db_pool()
+    paper_repo = PaperRepository(pool)
+    if not await paper_repo.run_exists(run_id):
+        raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found.")
+
+    embedding_provider = None
+    if with_dense and settings.EMBEDDING_API_KEY:
+        from app.providers.embeddings.factory import create_embedding_provider  # noqa: PLC0415
+
+        embedding_provider = create_embedding_provider()
+
+    loader = RunCorpusLoader(
+        paper_repo=paper_repo,
+        storage_client=SupabaseStorageClient(),
+        embedding_repo=EmbeddingRepository(pool) if embedding_provider is not None else None,
+    )
+    corpus = await loader.load(run_id)
+    if not corpus.get_all_chunks():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"run_id '{run_id}' has no chunked papers yet; run /chunks "
+                "(and /represent for dense retrieval) first."
+            ),
+        )
+    return RetrievalService(corpus, embedding_provider=embedding_provider)
+
+
+async def _run_retrieval(request: RetrieveRequest, method: str) -> RetrieveResponse:
+    _validate_retrieve_request(request)
+    service = await _build_retrieval_service(request.run_id, with_dense=method != "sparse")
+    results = await service.aretrieve(query=request.query, top_k=request.top_k, method=method)
+    return _build_retrieve_response(request, results)
 
 
 @router.post(
@@ -571,20 +631,12 @@ def _validate_retrieve_request(request: RetrieveRequest) -> None:
 )
 async def retrieve_dense(request: RetrieveRequest) -> RetrieveResponse:
     """
-    Run semantic dense retrieval using vector similarity.
+    Run semantic dense retrieval over the run's chunks.
 
-    Embeds the query into a dense vector and computes cosine similarity
-    against all corpus chunk embeddings.  Returns the top-k most similar
-    chunks.
-
-    Only the DenseRetriever is invoked.
+    Embeds the query and ranks the run's chunks by cosine similarity to
+    their stored embeddings (from /represent).  Requires EMBEDDING_API_KEY.
     """
-    from app.retrieval.service import RetrievalService  # noqa: PLC0415
-
-    _validate_retrieve_request(request)
-    service = RetrievalService()
-    results = service.retrieve(query=request.query, top_k=request.top_k, method="dense")
-    return _build_retrieve_response(request.query, request.top_k, results)
+    return await _run_retrieval(request, "dense")
 
 
 @router.post(
@@ -594,42 +646,12 @@ async def retrieve_dense(request: RetrieveRequest) -> RetrieveResponse:
 )
 async def retrieve_sparse(request: RetrieveRequest) -> RetrieveResponse:
     """
-    Run lexical retrieval using BM25 keyword matching.
+    Run BM25 keyword retrieval over the run's chunks.
 
-    Tokenises the query and scores each corpus chunk using the BM25 Okapi
-    formula (k1=1.5, b=0.75).  Returns the top-k highest-scoring chunks.
-
-    Only the SparseRetriever is invoked.
+    Uses the run's persisted BM25 index (from /represent), or builds one
+    from the chunks if it is missing or stale (k1=1.5, b=0.75).
     """
-    from app.retrieval.service import RetrievalService  # noqa: PLC0415
-
-    _validate_retrieve_request(request)
-    service = RetrievalService()
-    results = service.retrieve(query=request.query, top_k=request.top_k, method="sparse")
-    return _build_retrieve_response(request.query, request.top_k, results)
-
-
-@router.post(
-    "/retrieve/knowledge-graph",
-    response_model=RetrieveResponse,
-    summary="Knowledge Graph retrieval",
-)
-async def retrieve_knowledge_graph(request: RetrieveRequest) -> RetrieveResponse:
-    """
-    Run concept/entity retrieval using the knowledge graph.
-
-    Matches query terms to entities in the knowledge graph, traverses
-    1-hop relationships, and collects linked document chunks ranked by
-    connection strength.
-
-    Only the KnowledgeGraphRetriever is invoked.
-    """
-    from app.retrieval.service import RetrievalService  # noqa: PLC0415
-
-    _validate_retrieve_request(request)
-    service = RetrievalService()
-    results = service.retrieve(query=request.query, top_k=request.top_k, method="knowledge_graph")
-    return _build_retrieve_response(request.query, request.top_k, results)
+    return await _run_retrieval(request, "sparse")
 
 
 @router.post(
@@ -639,21 +661,11 @@ async def retrieve_knowledge_graph(request: RetrieveRequest) -> RetrieveResponse
 )
 async def retrieve_hybrid(request: RetrieveRequest) -> RetrieveResponse:
     """
-    Run hybrid retrieval combining dense, sparse, and knowledge-graph
-    results using the existing fusion strategy (Reciprocal Rank Fusion).
-
-    Invokes DenseRetriever, SparseRetriever, and KnowledgeGraphRetriever
-    independently, then fuses their ranked results via RRF (k=60).
-
-    The fused results deduplicate across methods and include provenance
-    metadata (``contributing_methods``, ``rrf_k``).
+    Fuse dense and BM25 retrieval over the run's chunks with Reciprocal
+    Rank Fusion (k=60).  Falls back to BM25 alone when no embedding API
+    key is configured.
     """
-    from app.retrieval.service import RetrievalService  # noqa: PLC0415
-
-    _validate_retrieve_request(request)
-    service = RetrievalService()
-    results = service.retrieve(query=request.query, top_k=request.top_k, method="hybrid")
-    return _build_retrieve_response(request.query, request.top_k, results)
+    return await _run_retrieval(request, "hybrid")
 
 
 @router.post("/gaps", response_model=GapsResponse, summary="Retrieve detected gaps")

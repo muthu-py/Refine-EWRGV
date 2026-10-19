@@ -1,33 +1,31 @@
 # Retrieval API Documentation
 
+Retrieval runs over the processed corpus of one research run: the
+full-text `PaperChunk`s that `/chunks` wrote to `papers/{paper_id}/chunks.json`,
+the dense embeddings `/represent` stored in `chunk_embeddings`, and the BM25
+index `/represent` persisted at `BM25_INDEX_PATH/<run_id>/bm25_index.pkl`.
+
 ## Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/research/retrieve/dense` | POST | Dense (semantic) retrieval using vector similarity |
+| `/api/v1/research/retrieve/dense` | POST | Dense (semantic) retrieval over stored embeddings |
 | `/api/v1/research/retrieve/sparse` | POST | Sparse (BM25) lexical keyword matching |
-| `/api/v1/research/retrieve/knowledge-graph` | POST | Knowledge Graph concept/entity retrieval |
-| `/api/v1/research/retrieve/hybrid` | POST | Hybrid fusion of all three methods via RRF |
+| `/api/v1/research/retrieve/hybrid` | POST | Dense + BM25 fused with Reciprocal Rank Fusion |
 
 ---
 
 ## Request (all endpoints)
 
-### Headers
-
-```
-Content-Type: application/json
-```
-
-### Body
-
-| Field   | Type   | Required | Default | Constraints |
-|---------|--------|----------|---------|-------------|
-| `query` | string | **Yes**  | —       | Non-empty   |
-| `top_k` | int    | No       | `10`    | 1–100       |
+| Field    | Type   | Required | Default | Constraints |
+|----------|--------|----------|---------|-------------|
+| `run_id` | string | **Yes**  | —       | An existing research run with chunked papers |
+| `query`  | string | **Yes**  | —       | Non-empty   |
+| `top_k`  | int    | No       | `10`    | 1–100       |
 
 ```json
 {
+  "run_id": "3f0c...",
   "query": "How do Transformer models use attention?",
   "top_k": 5
 }
@@ -39,19 +37,23 @@ Content-Type: application/json
 
 ```json
 {
+  "run_id": "3f0c...",
   "query": "How do Transformer models use attention?",
   "top_k": 5,
   "total_results": 5,
   "results": [
     {
-      "chunk_id": "chunk-004-intro",
-      "paper_id": "paper-004",
-      "section": "Introduction",
-      "text": "Self-attention-based architectures...",
+      "chunk_id": "6b1e...",
+      "paper_id": "a91d...",
+      "section": "5 Limitations",
+      "section_type": "LIMITATIONS",
+      "page_start": 7,
+      "page_end": 8,
+      "text": "Our evaluation covers only English benchmarks...",
       "score": 0.3946,
       "rank": 1,
       "retrieval_method": "dense",
-      "metadata": {}
+      "metadata": {"title": "...", "publication_year": 2021, "doi": "10...."}
     }
   ]
 }
@@ -61,23 +63,16 @@ Content-Type: application/json
 
 | Field              | Type   | Description |
 |--------------------|--------|-------------|
-| `chunk_id`         | string | Unique chunk identifier |
-| `paper_id`         | string | Parent paper identifier |
-| `section`          | string | Section heading |
-| `text`             | string | Chunk text content |
+| `chunk_id`         | string | PaperChunk ID (from `chunks.json`) |
+| `paper_id`         | string | Parent paper ID |
+| `section`          | string | Original section heading (`section_title`) |
+| `section_type`     | string | Classified `SectionType` (e.g. `LIMITATIONS`, `FUTURE_WORK`) |
+| `page_start` / `page_end` | int | 1-based PDF pages the chunk spans |
+| `text`             | string | Original chunk text |
 | `score`            | float  | Method-specific score (higher is better) |
 | `rank`             | int    | 1-based rank |
-| `retrieval_method` | string | `"dense"`, `"sparse"`, `"knowledge_graph"`, or `"hybrid"` |
-| `metadata`         | object | Method-specific provenance |
-
-### Metadata by Endpoint
-
-| Endpoint | `retrieval_method` | Metadata |
-|----------|--------------------|----------|
-| `/retrieve/dense` | `"dense"` | `{}` |
-| `/retrieve/sparse` | `"sparse"` | `{}` |
-| `/retrieve/knowledge-graph` | `"knowledge_graph"` | `matched_entities`, `relations` |
-| `/retrieve/hybrid` | `"hybrid"` | `contributing_methods`, `rrf_k` |
+| `retrieval_method` | string | `"dense"`, `"sparse"` or `"hybrid"` |
+| `metadata`         | object | Paper `title`, `publication_year`, `doi`; hybrid adds `contributing_methods`, `rrf_k` |
 
 ---
 
@@ -85,125 +80,78 @@ Content-Type: application/json
 
 | Status | Condition |
 |--------|-----------|
-| 400    | Empty query, invalid top_k (≤0 or >100) |
-| 422    | Missing required `query` field |
-
-```json
-{
-  "error": "Query must be a non-empty string.",
-  "detail": null
-}
-```
+| 400    | Blank `run_id` or query, invalid `top_k` (≤0 or >100), `/dense` without `EMBEDDING_API_KEY` |
+| 404    | `run_id` not found |
+| 409    | The run has no chunked papers yet (run `/chunks`, and `/represent` for dense) |
+| 422    | Missing `run_id` or `query` |
 
 ---
 
-## Example Curl Requests
-
-### Dense
-
-```bash
-curl -X POST http://localhost:8000/api/v1/research/retrieve/dense \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Transformer attention mechanisms", "top_k": 3}'
-```
-
-### Sparse
-
-```bash
-curl -X POST http://localhost:8000/api/v1/research/retrieve/sparse \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Transformer attention mechanisms", "top_k": 3}'
-```
-
-### Knowledge Graph
-
-```bash
-curl -X POST http://localhost:8000/api/v1/research/retrieve/knowledge-graph \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Transformer attention mechanisms", "top_k": 3}'
-```
-
-### Hybrid
+## Example
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/research/retrieve/hybrid \
   -H "Content-Type: application/json" \
-  -d '{"query": "Transformer attention mechanisms", "top_k": 5}'
+  -d '{"run_id": "<run_id>", "query": "Transformer attention mechanisms", "top_k": 5}'
 ```
+
+`scripts/verify_retrieval.py <run_id> "query"` prints sparse, dense and
+hybrid results for a run from the command line.
 
 ---
 
 ## How Each Method Works
 
-### Dense (Cosine Similarity)
+### Dense (cosine similarity)
 
 ```
-query → embed(query) → cosine_similarity(query_vec, chunk_vec) → top-K
+query → embed(query) → cosine(query_vec, stored chunk_vec) → top-K
 ```
 
-Only the `DenseRetriever` is invoked. Uses `EmbeddingProvider` for vector embeddings.
+Chunk vectors come from `chunk_embeddings` for the configured
+`EMBEDDING_MODEL`; chunks without a stored vector are embedded once on
+demand.  Requires `EMBEDDING_API_KEY`.
 
 ### Sparse (BM25 Okapi)
 
 ```
-query → tokenize(query) → BM25_score(query_tokens, chunk_tokens) → top-K
+query → tokenize(query) → BM25(query_tokens, chunk_tokens) → top-K
 ```
 
-Only the `SparseRetriever` is invoked. Self-contained BM25 with k1=1.5, b=0.75.
-
-### Knowledge Graph
-
-```
-query → find_entities(query) → traverse_1_hop() → collect_chunks() → score → top-K
-```
-
-Only the `KnowledgeGraphRetriever` is invoked. Scores: direct match = 1.0, related = 0.5, normalised to [0,1].
+Uses the run's persisted index; it is rebuilt from the chunks when missing,
+unreadable, or stale (its chunk IDs no longer match `chunks.json`).
+k1=1.5, b=0.75.
 
 ### Hybrid (Reciprocal Rank Fusion)
 
 ```
-query → DenseRetriever → ranked list
-      → SparseRetriever → ranked list
-      → KGRetriever → ranked list
-      → RRF(all lists, k=60) → deduplicated top-K
+query → DenseRetriever  → ranked list ┐
+      → SparseRetriever → ranked list ┴→ RRF(k=60) → deduplicated top-K
 ```
 
-All three retrievers are invoked. Results fused via RRF: `score(d) = Σ 1/(k + rank_i(d))`.
+`score(d) = Σ 1/(k + rank_i(d))`.  Without `EMBEDDING_API_KEY`, `/hybrid`
+falls back to BM25 alone.
 
 ---
 
-## Complete Request Flow
+## Request Flow
 
 ```
 POST /api/v1/research/retrieve/{method}
         │
         ▼
-   RetrieveRequest (validated: non-empty query, 1 ≤ top_k ≤ 100)
+   RetrieveRequest (validated: run_id, non-empty query, 1 ≤ top_k ≤ 100)
         │
         ▼
-   RetrievalService.retrieve(query, top_k, method)
-        │
-        ├── /dense  ──────► DenseRetriever only
-        ├── /sparse ──────► SparseRetriever only
-        ├── /knowledge-graph ► KGRetriever only
-        └── /hybrid ──────► Dense + Sparse + KG → RRF fusion
+   RunCorpusLoader.load(run_id) → RunCorpus (PaperChunks + embeddings + BM25)
         │
         ▼
-   list[RetrievalResult]  (domain model)
+   RetrievalService(corpus, embedding_provider).aretrieve(query, top_k, method)
         │
         ▼
-   RetrieveResponse  (API schema)
+   list[RetrievalResult] → RetrieveResponse
 ```
 
----
-
-## Query Understanding Compatibility
-
-The `/query` endpoint returns `expanded_queries: list[str]`. The `/retrieve/*` endpoints accept raw query text.
-
-**Usage:**
-1. **Direct:** POST to any `/retrieve/*` endpoint with the original research question
-2. **With expansion:** POST `/query` first, then POST to `/retrieve/*` once per expanded query
-3. **Pipeline (future):** Stage 4 of ResearchPipeline will auto-feed expanded queries
-
-No query_id or session state is required.
+The `/query` endpoint returns `expanded_queries`; post each one to
+`/retrieve/*` with the same `run_id` to retrieve for them as well.
+ResearchPipeline Stage 4 does this automatically.

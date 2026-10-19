@@ -4,13 +4,14 @@ tests/unit/test_pipeline_offline.py
 Credential-free end-to-end test of pipeline Stages 1 → 7.
 
 Unlike tests/unit/test_pipeline.py (which mocks the QueryUnderstandingService),
-this runs the REAL QueryUnderstandingService, RetrievalService (stub corpus),
+this runs the REAL QueryUnderstandingService, hybrid RetrievalService over a
+RunCorpus of PaperChunks (tests/fixtures/sample_corpus.py),
 GapDetector and CandidateRanker.  Only the LLM is replaced, by a strict
 scripted fake that implements exactly the LLMProvider protocol — calling any
 other method raises AttributeError, unlike an unspecced MagicMock.
 
-No API key, no network.  Exercises the stub corpus only — NOT evidence that
-detection works on collected research papers.
+No API key, no network.  The embedder is a deterministic hash
+(FakeEmbeddingProvider), so dense scores are not semantic.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from app.orchestration.research_pipeline import ResearchPipeline
 from app.query_understanding.service import QueryUnderstandingService
 from app.retrieval.service import RetrievalService
 from tests.fixtures.fake_llm import ScriptedFakeLLM
+from tests.fixtures.sample_corpus import FakeEmbeddingProvider, make_sample_corpus
 
 QUESTION = "GPT-3 limitations structured prediction reasoning"
 
@@ -83,15 +85,16 @@ def _run() -> tuple[ScriptedFakeLLM, object]:
         query_understanding_service=QueryUnderstandingService(llm=llm),
         literature_collector=None,
         document_parser=None,
-        retriever=RetrievalService(),
+        retriever=None,
         reranker=None,
         gap_detector=GapDetector(llm),
         candidate_ranker=CandidateRanker(),
         ewrgv_validator=None,
         top_k_gaps=5,
         retrieval_top_k=3,
+        retriever_factory=lambda corpus: RetrievalService(corpus, FakeEmbeddingProvider()),
     )
-    return llm, pipeline.run(QUESTION)
+    return llm, pipeline.run(QUESTION, corpus=make_sample_corpus())
 
 
 class TestOfflinePipelineStages1To7:

@@ -30,20 +30,25 @@ testable and ensures infrastructure is swappable.
 
 Corpus selection (Stages 3–4)
 ----------------------------
-* When Stage 2 produced a CollectionResult, Stage 3 builds an in-memory
-  CollectionCorpusStore from the collected papers' titles + abstracts and
-  Stage 4 retrieves from it with BM25 (``collection_retriever_factory``).
-  The injected ``retriever`` (stub corpus in development) is NOT used, even
-  if the collection is empty or failed — gaps must never come from an
-  unrelated corpus.  If the collected corpus has no usable abstracts, the
-  run stops at DOCUMENT_PROCESSING with ``error`` explaining why.
-  Corpus-construction or retriever-factory failures end the run as FAILED.
-* When no collection ran (no LiteratureCollectionService injected), Stage 4
-  uses the injected ``retriever`` as before.
-``PipelineResult.corpus_source`` records which path was taken.
+The retrieval corpus is the run's RunCorpus (app.ingestion.corpus): the
+full-text PaperChunks produced by /acquire → /parse → /sections → /chunks,
+with the embeddings and BM25 index from /represent.  Those phases run as
+background jobs, so the corpus is supplied to the pipeline rather than
+built inside it:
 
-Limitation: PDF full text is not parsed yet, so collected-paper chunks are
-abstract-level only.
+* ``run(query, corpus=...)`` or ``run_on_corpus(query, corpus)`` — Stage 4
+  retrieves from that corpus with ``retriever_factory(corpus)`` (default:
+  BM25 via RetrievalService).  An empty corpus stops the run at
+  DOCUMENT_PROCESSING with ``error`` explaining why.
+* A ``corpus_loader`` (``run_id -> CorpusStore``) may be injected instead;
+  it is called after Stage 2 with the collection's run ID.
+* If a collection ran but no corpus is available, the run stops after
+  Stage 2: the collected papers must be processed first.  The injected
+  ``retriever`` is NOT used then — gaps must never come from an unrelated
+  corpus.
+* When no collection ran and no corpus is given, Stage 4 uses the injected
+  ``retriever``.
+``PipelineResult.corpus_source`` records which path was taken.
 """
 
 from __future__ import annotations
@@ -60,22 +65,21 @@ from app.core.exceptions import (
     RetrievalError,
 )
 from app.core.logging import get_logger
-from app.domain.enums import PipelineStage
+from app.domain.enums import PipelineStage, SectionType
 from app.domain.interfaces import CorpusStore
 from app.domain.models.candidate_gap import CandidateGap
 from app.domain.models.collection import CollectionResult
-from app.domain.models.paper import DocumentChunk
+from app.domain.models.paper_chunk import PaperChunk
 from app.domain.models.query import ResearchQuery
 from app.domain.models.retrieval_result import RetrievalResult
 from app.domain.models.validation import ValidationResult
 from app.gap_detection.evidence_scoring import CandidateEvidenceScorer
 from app.gap_detection.llm_call import redact_secrets
 from app.ingestion.collectors.service import LiteratureCollectionService
-from app.ingestion.corpus.collection_corpus import CollectionCorpusStore
 from app.query_understanding.service import QueryUnderstandingService
-from app.retrieval.bm25 import SparseRetriever
+from app.retrieval.service import RetrievalService
 
-CORPUS_SOURCE_COLLECTION = "collection"
+CORPUS_SOURCE_RUN = "run_corpus"
 CORPUS_SOURCE_INJECTED = "injected_retriever"
 
 # Cap on the provider error text copied into PipelineResult.error.
@@ -102,10 +106,13 @@ def _provider_error_summary(collection: CollectionResult) -> str:
     return f" {count} provider {noun}; first ({provider}): {text}"
 
 
-def _default_collection_retriever(corpus: CorpusStore) -> SparseRetriever:
-    """BM25 over the collected-papers corpus (the only meaningful retriever until
-    real embeddings exist; the stub embeddings are hash-based)."""
-    return SparseRetriever(corpus_store=corpus)
+def _default_corpus_retriever(corpus: CorpusStore) -> RetrievalService:
+    """BM25 over the run corpus (uses the run's persisted index when loaded).
+
+    Returns scored RetrievalResults so Stage 4 can record provenance.  Inject
+    a factory passing an embedding provider to RetrievalService to make it
+    hybrid (dense + BM25)."""
+    return RetrievalService(corpus)
 
 logger = get_logger(__name__)
 
@@ -132,12 +139,15 @@ class PipelineResult:
     error:
         Error message if the pipeline failed or could not proceed.
     retrieved_chunks:
-        Chunks retrieved in Stage 4 and passed to gap detection.
+        PaperChunks retrieved in Stage 4 and passed to gap detection.
     corpus_source:
-        ``"collection"`` when Stage 4 retrieved from the collected papers,
+        ``"run_corpus"`` when Stage 4 retrieved from the run's corpus,
         ``"injected_retriever"`` when it used the injected retriever.
     corpus_stats:
-        CollectionCorpusStore statistics (collection path only).
+        RunCorpus statistics (run-corpus path only).
+    retrieval_provenance:
+        ``chunk_id → {retrieval_score, retrieval_rank, retrieval_method,
+        query}`` for each retrieved chunk, when the retriever reports scores.
 
     Fields added after Phase 2.2 are appended at the end so positional
     construction of the original fields keeps working.
@@ -150,9 +160,10 @@ class PipelineResult:
     validation_results: list[ValidationResult] = field(default_factory=list)
     stage_reached: PipelineStage = PipelineStage.CREATED
     error: Optional[str] = None
-    retrieved_chunks: list[DocumentChunk] = field(default_factory=list)
+    retrieved_chunks: list[PaperChunk] = field(default_factory=list)
     corpus_source: Optional[str] = None
     corpus_stats: dict = field(default_factory=dict)
+    retrieval_provenance: dict[str, dict] = field(default_factory=dict)
 
 
 class ResearchPipeline:
@@ -175,9 +186,12 @@ class ResearchPipeline:
     retrieval_top_k      : int
         Results requested per query in Stage 4, and the cap on the merged
         chunk list passed to gap detection.
-    collection_retriever_factory : Callable[[CorpusStore], retriever]
-        Builds the Stage 4 retriever over the collected-papers corpus.
-        Defaults to BM25 (SparseRetriever).
+    retriever_factory : Callable[[CorpusStore], retriever]
+        Builds the Stage 4 retriever over the run corpus.
+        Defaults to BM25 (RetrievalService without an embedding provider).
+    corpus_loader : Callable[[str], CorpusStore], optional
+        Returns the processed corpus for a run ID (e.g. a RunCorpus loaded
+        ahead of time).  Called after Stage 2 when no corpus is passed in.
     evidence_scorer : CandidateEvidenceScorer, optional
         If given, each detected candidate is given a pre-validation
         evidence-weighted assessment (Stage 6b) before ranking, and the
@@ -198,8 +212,9 @@ class ResearchPipeline:
         top_k_gaps: int = 5,
         literature_collection_service: Optional[LiteratureCollectionService] = None,
         retrieval_top_k: int = 20,
-        collection_retriever_factory: Optional[Callable[[CorpusStore], Any]] = None,
+        retriever_factory: Optional[Callable[[CorpusStore], Any]] = None,
         evidence_scorer: Optional[CandidateEvidenceScorer] = None,
+        corpus_loader: Optional[Callable[[str], Optional[CorpusStore]]] = None,
     ) -> None:
         self._qu_service = query_understanding_service
         # Phase 2.2: prefer the high-level service if provided; fall back
@@ -214,14 +229,21 @@ class ResearchPipeline:
         self._validator = ewrgv_validator
         self._top_k_gaps = top_k_gaps
         self._retrieval_top_k = retrieval_top_k
-        self._collection_retriever_factory = (
-            collection_retriever_factory or _default_collection_retriever
-        )
+        self._retriever_factory = retriever_factory or _default_corpus_retriever
         self._evidence_scorer = evidence_scorer
+        self._corpus_loader = corpus_loader
 
-    def run(self, query_text: str) -> PipelineResult:
+    def run(self, query_text: str, corpus: Optional[CorpusStore] = None) -> PipelineResult:
         """
         Execute the full pipeline for a research question.
+
+        Parameters
+        ----------
+        query_text:
+            The research question.
+        corpus:
+            The processed corpus to detect gaps in (normally the run's
+            RunCorpus).  See "Corpus selection" in the module docstring.
 
         Returns
         -------
@@ -297,27 +319,79 @@ class ResearchPipeline:
             )
 
         # -------------------------------------------------------------- #
-        # Stage 3: Corpus construction
-        # Collected papers → title + abstract chunks.
-        # TODO: PDF parsing + sectioning + chunking (self._parser).
+        # Stage 3: Corpus selection (the run's processed PaperChunks)
         # -------------------------------------------------------------- #
-        corpus: Optional[CollectionCorpusStore] = None
-        if result.collection_result is not None:
-            result.corpus_source = CORPUS_SOURCE_COLLECTION
+        if corpus is None and self._corpus_loader is not None and result.collection_result is not None:
+            run_id = result.collection_result.query_id
             try:
-                corpus = CollectionCorpusStore.from_collection_result(result.collection_result)
-                result.corpus_stats = dict(corpus.stats)
-                retriever = self._collection_retriever_factory(corpus)
+                corpus = self._corpus_loader(run_id)
             except Exception as exc:  # noqa: BLE001 — wrapped like other stage failures
                 error = (
                     exc
                     if isinstance(exc, EWRGVError)
-                    else IngestionError(
-                        f"Corpus construction failed: {type(exc).__name__}: {exc}"
+                    else IngestionError(f"Corpus loading failed: {type(exc).__name__}: {exc}")
+                )
+                logger.error(
+                    "ResearchPipeline: Stage 3 failed (corpus loading)",
+                    extra={"error": str(error), "run_id": run_id},
+                    exc_info=True,
+                )
+                result.error = str(error)
+                result.stage_reached = PipelineStage.FAILED
+                return result
+
+        if corpus is None and result.collection_result is not None:
+            # Never fall back to the injected retriever after a collection:
+            # gaps would describe papers that are not in this run.
+            result.error = (
+                "No processed corpus for this run: the collected papers must be "
+                "acquired, parsed, sectioned, chunked and represented "
+                "(/acquire → /parse → /sections → /chunks → /represent) before "
+                "candidate gap detection."
+                f"{_provider_error_summary(result.collection_result)}"
+            )
+            logger.warning(
+                "ResearchPipeline: Stage 3 — no corpus for the collected run; stopping.",
+                extra={"query_id": enriched_query.query_id},
+            )
+            return result
+
+        return self._detect_from_corpus(result, enriched_query, corpus)
+
+    def run_on_corpus(self, query: ResearchQuery, corpus: CorpusStore) -> PipelineResult:
+        """
+        Run Stages 3–7 on an already processed corpus.
+
+        ``query`` should be the enriched query from Stage 1 (its expanded
+        queries drive Stage 4).  Query understanding and collection are not
+        repeated.
+        """
+        result = PipelineResult(query=query, stage_reached=PipelineStage.LITERATURE_COLLECTION)
+        return self._detect_from_corpus(result, query, corpus)
+
+    def _detect_from_corpus(
+        self,
+        result: PipelineResult,
+        enriched_query: ResearchQuery,
+        corpus: Optional[CorpusStore],
+    ) -> PipelineResult:
+        """Stages 3 (corpus checks) to 7 (ranking)."""
+        if corpus is not None:
+            result.corpus_source = CORPUS_SOURCE_RUN
+            stats = getattr(corpus, "stats", None)
+            result.corpus_stats = dict(stats) if isinstance(stats, dict) else {}
+            try:
+                retriever = self._retriever_factory(corpus)
+            except Exception as exc:  # noqa: BLE001 — wrapped like other stage failures
+                error = (
+                    exc
+                    if isinstance(exc, EWRGVError)
+                    else RetrievalError(
+                        f"Retriever construction failed: {type(exc).__name__}: {exc}"
                     )
                 )
                 logger.error(
-                    "ResearchPipeline: Stage 3 failed (corpus construction)",
+                    "ResearchPipeline: Stage 3 failed (retriever construction)",
                     extra={"error": str(error)},
                     exc_info=True,
                 )
@@ -327,40 +401,33 @@ class ResearchPipeline:
 
             result.stage_reached = PipelineStage.DOCUMENT_PROCESSING
             if not corpus.get_all_chunks():
-                # Never fall back to the injected (stub) corpus after a
-                # collection attempt: gaps would describe unrelated papers.
                 result.error = (
-                    "No usable abstracts in the collected corpus "
-                    f"(collection status: {result.collection_result.status}; "
-                    f"{corpus.stats['collected_records']} records, "
-                    f"{corpus.stats['unique_papers']} unique papers, "
-                    f"{corpus.stats['skipped_no_abstract']} without abstract)."
-                    f"{_provider_error_summary(result.collection_result)} "
+                    "The run corpus has no chunks "
+                    f"({len(corpus.get_all_papers())} papers). Run /chunks for the "
+                    "run's parsed papers before candidate gap detection. "
                     "Candidate gap detection was not run."
                 )
                 logger.warning(
-                    "ResearchPipeline: Stage 3 — collected corpus has no usable "
-                    "abstracts; stopping (stub corpus NOT used).",
-                    extra={"query_id": enriched_query.query_id, **corpus.stats},
+                    "ResearchPipeline: Stage 3 — run corpus has no chunks; stopping.",
+                    extra={"query_id": enriched_query.query_id, **result.corpus_stats},
                 )
                 return result
             logger.info(
                 "ResearchPipeline: Stage 3 complete",
-                extra={"query_id": enriched_query.query_id, **corpus.stats},
+                extra={"query_id": enriched_query.query_id, **result.corpus_stats},
             )
         else:
             retriever = self._retriever
             result.corpus_source = CORPUS_SOURCE_INJECTED
             logger.debug(
-                "ResearchPipeline: Stage 3 skipped — no collection result; "
-                "using the injected retriever's corpus."
+                "ResearchPipeline: Stage 3 skipped — no corpus; using the injected retriever."
             )
 
         # -------------------------------------------------------------- #
         # Stage 4: Retrieval over the original + expanded queries
         # -------------------------------------------------------------- #
         try:
-            chunks = self._retrieve_chunks(enriched_query, retriever, corpus)
+            chunks = self._retrieve_chunks(enriched_query, retriever, corpus, result)
         except EWRGVError as exc:
             logger.error(
                 "ResearchPipeline: Stage 4 failed (retrieval)",
@@ -467,7 +534,8 @@ class ResearchPipeline:
         query: ResearchQuery,
         retriever: Any,
         corpus: Optional[CorpusStore] = None,
-    ) -> list[DocumentChunk]:
+        result: Optional[PipelineResult] = None,
+    ) -> list[PaperChunk]:
         """
         Retrieve for the original query and each expanded query, then merge.
 
@@ -475,69 +543,80 @@ class ResearchPipeline:
         the earlier query, then the earlier position.  Duplicate chunk IDs
         are collapsed.  The merged list is capped at ``retrieval_top_k``.
 
-        When ``corpus`` is given, each retrieved chunk is restored from the
-        corpus by chunk_id so its provenance metadata survives (some
-        retrievers, e.g. SparseRetriever.retrieve, return chunks without it).
+        Retrievers may return PaperChunks or RetrievalResults.  When
+        ``corpus`` is given, every item is resolved to the corpus's
+        PaperChunk by chunk_id (items not in the corpus are dropped), so
+        detection always sees the canonical chunk.  Retrieval scores are
+        recorded in ``result.retrieval_provenance``.
         """
         queries: list[str] = []
         for q in [query.query, *query.expanded_queries]:
             if q and q.strip() and q not in queries:
                 queries.append(q)
 
-        corpus_chunks = (
-            {c.chunk_id: c for c in corpus.get_all_chunks()} if corpus is not None else {}
-        )
-
-        best: dict[str, tuple[int, int, DocumentChunk]] = {}
+        best: dict[str, tuple[int, int, PaperChunk, dict]] = {}
         for query_index, q in enumerate(queries):
             items = retriever.retrieve(q, top_k=self._retrieval_top_k) or []
             for position, item in enumerate(items):
-                chunk = _with_corpus_provenance(_to_document_chunk(item), corpus_chunks)
+                chunk, provenance = _to_paper_chunk(item, corpus)
+                if chunk is None:
+                    continue
+                provenance["query"] = q
                 key = (position + 1, query_index)
                 current = best.get(chunk.chunk_id)
                 if current is None or key < current[:2]:
-                    best[chunk.chunk_id] = (*key, chunk)
+                    best[chunk.chunk_id] = (*key, chunk, provenance)
 
-        merged = sorted(best.values(), key=lambda entry: (entry[0], entry[1]))
-        return [chunk for _, _, chunk in merged[: self._retrieval_top_k]]
-
-
-def _with_corpus_provenance(
-    chunk: DocumentChunk, corpus_chunks: dict[str, DocumentChunk]
-) -> DocumentChunk:
-    """Restore a retrieved chunk's corpus text and metadata (retrieval keys win)."""
-    original = corpus_chunks.get(chunk.chunk_id)
-    if original is None:
-        return chunk
-    return original.model_copy(
-        update={"metadata": {**original.metadata, **chunk.metadata}}
-    )
-
-
-def _to_document_chunk(item: DocumentChunk | RetrievalResult) -> DocumentChunk:
-    """
-    Normalise a retriever output item to a DocumentChunk.
-
-    The domain Retriever protocol returns DocumentChunk, while HybridRetriever
-    and RetrievalService return RetrievalResult.  Retrieval scores are kept in
-    chunk metadata for provenance.
-    """
-    if isinstance(item, DocumentChunk):
-        return item
-    if isinstance(item, RetrievalResult):
-        metadata = dict(item.metadata)
-        metadata.update(
-            {
-                "retrieval_score": item.score,
-                "retrieval_rank": item.rank,
-                "retrieval_method": item.retrieval_method,
+        merged = sorted(best.values(), key=lambda entry: (entry[0], entry[1]))[
+            : self._retrieval_top_k
+        ]
+        if result is not None:
+            result.retrieval_provenance = {
+                chunk.chunk_id: provenance for _, _, chunk, provenance in merged if provenance
             }
-        )
-        return DocumentChunk(
+        return [chunk for _, _, chunk, _ in merged]
+
+
+def _to_paper_chunk(
+    item: PaperChunk | RetrievalResult, corpus: Optional[CorpusStore]
+) -> tuple[Optional[PaperChunk], dict]:
+    """
+    Normalise a retriever output item to a PaperChunk plus score provenance.
+
+    With a corpus, the corpus's chunk is returned (``None`` if the ID is not
+    in the corpus).  Without one, a RetrievalResult is converted field by
+    field (section_id is unknown and left empty).
+    """
+    provenance: dict = {}
+    if isinstance(item, RetrievalResult):
+        provenance = {
+            "retrieval_score": item.score,
+            "retrieval_rank": item.rank,
+            "retrieval_method": item.retrieval_method,
+        }
+    elif not isinstance(item, PaperChunk):
+        raise TypeError(f"Unsupported retrieval result type: {type(item).__name__}")
+
+    if corpus is not None:
+        return corpus.get_chunk_by_id(item.chunk_id), provenance
+    if isinstance(item, PaperChunk):
+        return item, provenance
+
+    try:
+        section_type = SectionType(item.section_type)
+    except ValueError:
+        section_type = SectionType.UNKNOWN
+    return (
+        PaperChunk(
             chunk_id=item.chunk_id,
             paper_id=item.paper_id,
-            section=item.section,
+            section_id="",
+            section_title=item.section,
+            section_type=section_type,
             text=item.text,
-            metadata=metadata,
-        )
-    raise TypeError(f"Unsupported retrieval result type: {type(item).__name__}")
+            page_start=item.page_start or 1,
+            page_end=item.page_end or item.page_start or 1,
+            character_count=len(item.text),
+        ),
+        provenance,
+    )

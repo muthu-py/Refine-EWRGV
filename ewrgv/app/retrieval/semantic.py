@@ -4,16 +4,16 @@ app/retrieval/semantic.py
 Dense semantic retrieval using vector similarity search.
 
 Depends on:
-    EmbeddingProvider  (app.domain.interfaces) — for query/chunk embedding
-    CorpusStore        (app.domain.interfaces) — for accessing document chunks
+    EmbeddingProvider  (app.domain.interfaces) — embeds the query
+    CorpusStore        (app.domain.interfaces) — the run's PaperChunks
 
-Flow:
-    query → embed query → compute cosine similarity against all corpus
-    chunk embeddings → return top-K results sorted by similarity score.
+Chunk vectors come from the corpus when it carries stored embeddings
+(RunCorpus.get_embedding, loaded from the ``chunk_embeddings`` table in
+Phase 2.9).  Chunks without a stored vector are embedded once with the
+provider and cached, so a partially embedded run still retrieves fully.
 
 Similarity metric: Cosine Similarity
     cos(a, b) = (a · b) / (‖a‖ × ‖b‖)
-    Range: [-1, 1] for general vectors; [0, 1] for normalised vectors.
 """
 
 from __future__ import annotations
@@ -22,20 +22,15 @@ import math
 
 from app.core.logging import get_logger
 from app.domain.interfaces import CorpusStore, EmbeddingProvider
-from app.domain.models.paper import DocumentChunk
+from app.domain.models.paper_chunk import PaperChunk
 from app.domain.models.retrieval_result import RetrievalResult
-from app.retrieval.interfaces import ScoredChunk
+from app.retrieval.interfaces import ScoredChunk, to_retrieval_result
 
 logger = get_logger(__name__)
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """
-    Compute cosine similarity between two vectors.
-
-    Returns a float in [-1.0, 1.0].  For unit-normalised vectors this
-    simplifies to the dot product.
-    """
+    """Cosine similarity in [-1, 1]; 0.0 for mismatched or zero vectors."""
     if len(a) != len(b):
         return 0.0
     dot = sum(x * y for x, y in zip(a, b))
@@ -48,27 +43,16 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 
 class DenseRetriever:
     """
-    Retrieves document chunks using dense vector similarity search.
-
-    Implementation
-    --------------
-    1. Embed the query string using the injected EmbeddingProvider.
-    2. Embed all corpus chunks (cached after first call).
-    3. Compute cosine similarity between the query embedding and each
-       chunk embedding.
-    4. Return the top-K most similar chunks as RetrievalResult objects.
+    Retrieves PaperChunks by cosine similarity to the query embedding.
 
     Parameters
     ----------
     embedding_provider:
-        Any object satisfying the EmbeddingProvider protocol.
+        Any object satisfying the EmbeddingProvider protocol.  Must be the
+        same model that produced the stored chunk embeddings.
     corpus_store:
-        Any object satisfying the CorpusStore protocol.
-
-    Notes
-    -----
-    Chunk embeddings are computed lazily on the first retrieval call and
-    cached in memory.  Call ``clear_cache()`` to force recomputation.
+        Any object satisfying the CorpusStore protocol.  If it exposes
+        ``get_embedding(chunk_id)`` (RunCorpus does), stored vectors are used.
     """
 
     def __init__(
@@ -78,17 +62,28 @@ class DenseRetriever:
     ) -> None:
         self._embedder = embedding_provider
         self._corpus = corpus_store
-        self._chunk_embeddings: list[tuple[DocumentChunk, list[float]]] | None = None
+        self._chunk_embeddings: list[tuple[PaperChunk, list[float]]] | None = None
 
-    def _ensure_index(self) -> list[tuple[DocumentChunk, list[float]]]:
-        """Build or return cached chunk embeddings."""
+    def _ensure_index(self) -> list[tuple[PaperChunk, list[float]]]:
+        """Collect stored vectors and embed any chunk that has none (cached)."""
         if self._chunk_embeddings is None:
-            chunks = self._corpus.get_all_chunks()
-            texts = [c.text for c in chunks]
-            embeddings = self._embedder.embed_batch(texts)
-            self._chunk_embeddings = list(zip(chunks, embeddings))
+            stored = getattr(self._corpus, "get_embedding", None)
+            pairs: list[tuple[PaperChunk, list[float] | None]] = [
+                (c, stored(c.chunk_id) if callable(stored) else None)
+                for c in self._corpus.get_all_chunks()
+            ]
+            missing = [c for c, vec in pairs if vec is None]
+            computed: dict[str, list[float]] = {}
+            if missing:
+                vectors = self._embedder.embed_batch([c.text for c in missing])
+                computed = {c.chunk_id: v for c, v in zip(missing, vectors)}
+            self._chunk_embeddings = [
+                (c, vec if vec is not None else computed[c.chunk_id]) for c, vec in pairs
+            ]
             logger.info(
-                "DenseRetriever: indexed %d chunks", len(self._chunk_embeddings)
+                "DenseRetriever: indexed %d chunks (%d embedded on demand)",
+                len(self._chunk_embeddings),
+                len(missing),
             )
         return self._chunk_embeddings
 
@@ -96,82 +91,28 @@ class DenseRetriever:
         """Clear the cached chunk embeddings to force recomputation."""
         self._chunk_embeddings = None
 
-    def retrieve(self, query: str, top_k: int = 20) -> list[DocumentChunk]:
-        """
-        Satisfy the Retriever interface.
-
-        Returns plain DocumentChunk objects without scores.
-        """
-        results = self.retrieve_results(query, top_k)
-        # Reconstruct DocumentChunk from result fields
-        return [
-            DocumentChunk(
-                chunk_id=r.chunk_id,
-                paper_id=r.paper_id,
-                section=r.section,
-                text=r.text,
-            )
-            for r in results
-        ]
+    def retrieve(self, query: str, top_k: int = 20) -> list[PaperChunk]:
+        """Satisfy the Retriever interface: ranked PaperChunks without scores."""
+        return [sc.chunk for sc in self.retrieve_scored(query, top_k)]
 
     def retrieve_scored(self, query: str, top_k: int = 20) -> list[ScoredChunk]:
-        """
-        Return scored chunks for internal fusion use.
-
-        Satisfies the ScoredRetriever protocol (app.retrieval.interfaces).
-        """
+        """Return cosine-scored chunks for internal fusion use (ties by chunk_id)."""
         index = self._ensure_index()
+        if not index or not query or not query.strip():
+            return []
         query_embedding = self._embedder.embed(query)
 
-        # Score all chunks
-        scored: list[tuple[DocumentChunk, float]] = []
-        for chunk, chunk_emb in index:
-            sim = _cosine_similarity(query_embedding, chunk_emb)
-            scored.append((chunk, sim))
-
-        # Sort by similarity descending, then by chunk_id for determinism
+        scored = [(chunk, _cosine_similarity(query_embedding, emb)) for chunk, emb in index]
         scored.sort(key=lambda x: (-x[1], x[0].chunk_id))
 
-        # Top-K
-        top = scored[:top_k]
-
         return [
-            ScoredChunk(
-                chunk=chunk,
-                score=score,
-                retriever="dense",
-                rank=rank + 1,
-            )
-            for rank, (chunk, score) in enumerate(top)
+            ScoredChunk(chunk=chunk, score=score, retriever="dense", rank=rank + 1)
+            for rank, (chunk, score) in enumerate(scored[:top_k])
         ]
 
     def retrieve_results(self, query: str, top_k: int = 20) -> list[RetrievalResult]:
-        """
-        Retrieve the top-K most similar document chunks as RetrievalResult objects.
-
-        Parameters
-        ----------
-        query:
-            The search query string.
-        top_k:
-            Number of top results to return.
-
-        Returns
-        -------
-        list[RetrievalResult]
-            Ranked list of retrieval results with ``retrieval_method="dense"``.
-        """
-        scored = self.retrieve_scored(query, top_k)
-
+        """Top-K dense results as RetrievalResult objects (``retrieval_method="dense"``)."""
         return [
-            RetrievalResult(
-                chunk_id=sc.chunk.chunk_id,
-                paper_id=sc.chunk.paper_id,
-                section=sc.chunk.section,
-                text=sc.chunk.text,
-                score=sc.score,
-                rank=sc.rank,
-                retrieval_method="dense",
-            )
-            for sc in scored
+            to_retrieval_result(sc, "dense", self._corpus.get_paper_by_id(sc.chunk.paper_id))
+            for sc in self.retrieve_scored(query, top_k)
         ]

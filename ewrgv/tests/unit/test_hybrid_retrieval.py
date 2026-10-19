@@ -4,13 +4,12 @@ tests/unit/test_hybrid_retrieval.py
 Unit tests for HybridRetriever and RRF fusion.
 
 Verifies:
-    - Combines all three retrieval methods
+    - Combines dense and sparse retrieval over the run corpus
     - RRF is applied correctly
     - Removes duplicate chunks
     - Preserves provenance
     - Respects final top_k
     - Deterministic ordering
-    - Works with 2 methods (without KG)
 """
 
 from __future__ import annotations
@@ -22,27 +21,21 @@ from app.retrieval.fusion import (
     HybridRetriever,
     reciprocal_rank_fusion_results,
 )
-from app.retrieval.knowledge_graph import KnowledgeGraphRetriever
 from app.retrieval.semantic import DenseRetriever
-from app.stubs.stub_corpus import StubCorpusStore
-from app.stubs.stub_knowledge_graph import StubKnowledgeGraphStore
-from app.stubs.stub_text_representation import StubEmbeddingProvider
+from tests.fixtures.sample_corpus import FakeEmbeddingProvider, make_sample_corpus
 
 
 def _build_full_hybrid() -> HybridRetriever:
-    """Build a HybridRetriever with all three methods."""
-    corpus = StubCorpusStore()
-    embedder = StubEmbeddingProvider()
-    kg = StubKnowledgeGraphStore()
+    """Build a dense + sparse HybridRetriever over the sample run corpus."""
+    corpus = make_sample_corpus()
+    embedder = FakeEmbeddingProvider()
 
     dense = DenseRetriever(embedding_provider=embedder, corpus_store=corpus)
     sparse = SparseRetriever(corpus_store=corpus)
-    kg_retriever = KnowledgeGraphRetriever(kg_store=kg, corpus_store=corpus)
 
     return HybridRetriever(
         dense_retriever=dense,
         sparse_retriever=sparse,
-        kg_retriever=kg_retriever,
         top_k=10,
         rrf_k=DEFAULT_RRF_K,
     )
@@ -216,26 +209,16 @@ class TestHybridRetriever:
             assert r.rank == i + 1
 
     # ------------------------------------------------------------------ #
-    # Without KG
+    # Provenance from PaperChunk
     # ------------------------------------------------------------------ #
 
-    def test_works_without_kg(self) -> None:
-        """HybridRetriever works with just dense + sparse (no KG)."""
-        corpus = StubCorpusStore()
-        embedder = StubEmbeddingProvider()
-        dense = DenseRetriever(embedding_provider=embedder, corpus_store=corpus)
-        sparse = SparseRetriever(corpus_store=corpus)
-
-        hybrid = HybridRetriever(
-            dense_retriever=dense,
-            sparse_retriever=sparse,
-            kg_retriever=None,
-            top_k=5,
-        )
-        results = hybrid.retrieve("Transformer model")
-        assert len(results) > 0
+    def test_results_carry_section_type(self) -> None:
+        """Fused results keep the PaperChunk section type and pages."""
+        results = self.hybrid.retrieve("GPT-3 limitations", top_k=5)
+        assert results
         for r in results:
-            assert r.retrieval_method == "hybrid"
+            assert r.section_type
+            assert r.page_start >= 1
 
     # ------------------------------------------------------------------ #
     # RRF constant
@@ -243,8 +226,8 @@ class TestHybridRetriever:
 
     def test_custom_rrf_k(self) -> None:
         """Custom RRF k is passed through to metadata."""
-        corpus = StubCorpusStore()
-        embedder = StubEmbeddingProvider()
+        corpus = make_sample_corpus()
+        embedder = FakeEmbeddingProvider()
         dense = DenseRetriever(embedding_provider=embedder, corpus_store=corpus)
         sparse = SparseRetriever(corpus_store=corpus)
 

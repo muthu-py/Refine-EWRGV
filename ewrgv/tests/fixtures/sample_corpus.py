@@ -1,29 +1,27 @@
 """
-app/stubs/stub_corpus.py
---------------------------
-Deterministic in-memory corpus store for development and testing.
+tests/fixtures/sample_corpus.py
+---------------------------------
+Deterministic in-memory test corpus of PaperChunks.
 
-.. warning::
-    This is a **development stub**.  It will be replaced by a real
-    database-backed CorpusStore implementation in a future phase.
+A small corpus of 5 ML/NLP papers with 2–3 chunks each, wrapped in a
+RunCorpus.  All IDs and text are fixed so retrieval tests are fully
+deterministic.  (Formerly app/stubs/stub_corpus.py; the production corpus
+is RunCorpus loaded from a run's chunks.json artifacts.)
 
-Provides a small mock corpus of 5 academic papers in the ML/NLP domain,
-each with 2–4 sections and 2–4 document chunks.  All IDs and text are
-fixed so that tests are fully deterministic.
-
-Satisfies the CorpusStore protocol (app.domain.interfaces).
+Also provides FakeEmbeddingProvider: deterministic hash-based vectors so
+dense retrieval can be tested without an embedding API.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+import hashlib
+import math
 
-from app.domain.models.paper import Author, DocumentChunk, Paper
+from app.domain.enums import SectionType
+from app.domain.models.paper import Author, Paper
+from app.domain.models.paper_chunk import PaperChunk
+from app.ingestion.corpus.run_corpus import RunCorpus
 
-
-# ======================================================================
-# Fixed paper data
-# ======================================================================
 
 _PAPERS: list[Paper] = [
     Paper(
@@ -39,7 +37,7 @@ _PAPERS: list[Paper] = [
             "network architecture, the Transformer, based solely on attention "
             "mechanisms, dispensing with recurrence and convolutions entirely."
         ),
-        source="stub_corpus",
+        source="sample_corpus",
         venue="NeurIPS 2017",
         publication_year=2017,
         sections={
@@ -74,7 +72,7 @@ _PAPERS: list[Paper] = [
             "BERT is designed to pre-train deep bidirectional representations from "
             "unlabeled text by jointly conditioning on both left and right context."
         ),
-        source="stub_corpus",
+        source="sample_corpus",
         venue="NAACL 2019",
         publication_year=2019,
         sections={
@@ -104,7 +102,7 @@ _PAPERS: list[Paper] = [
             "task-agnostic, few-shot performance, sometimes even reaching "
             "competitiveness with prior state-of-the-art fine-tuning approaches."
         ),
-        source="stub_corpus",
+        source="sample_corpus",
         venue="NeurIPS 2020",
         publication_year=2020,
         sections={
@@ -140,7 +138,7 @@ _PAPERS: list[Paper] = [
             "directly to sequences of image patches can perform very well on "
             "image classification tasks."
         ),
-        source="stub_corpus",
+        source="sample_corpus",
         venue="ICLR 2021",
         publication_year=2021,
         sections={
@@ -172,7 +170,7 @@ _PAPERS: list[Paper] = [
             "non-parametric memory for language generation. RAG models retrieve "
             "documents relevant to a question and use them to generate answers."
         ),
-        source="stub_corpus",
+        source="sample_corpus",
         venue="NeurIPS 2020",
         publication_year=2020,
         sections={
@@ -202,16 +200,14 @@ _PAPERS: list[Paper] = [
 ]
 
 
-# ======================================================================
-# Fixed chunk data — derived from paper sections
-# ======================================================================
-
-_CHUNKS: list[DocumentChunk] = [
+_CHUNKS: list[PaperChunk] = [
     # Paper 001 — Transformer
-    DocumentChunk(
+    PaperChunk(
         chunk_id="chunk-001-intro",
         paper_id="paper-001",
-        section="Introduction",
+        section_id="sec-chunk-001-intro",
+        section_title="Introduction",
+        section_type=SectionType.INTRODUCTION,
         text=(
             "Recurrent neural networks, long short-term memory and gated "
             "recurrent neural networks have been firmly established as state "
@@ -219,20 +215,24 @@ _CHUNKS: list[DocumentChunk] = [
             "problems such as language modeling and machine translation."
         ),
     ),
-    DocumentChunk(
+    PaperChunk(
         chunk_id="chunk-001-arch",
         paper_id="paper-001",
-        section="Model Architecture",
+        section_id="sec-chunk-001-arch",
+        section_title="Model Architecture",
+        section_type=SectionType.MODEL,
         text=(
             "The Transformer follows an encoder-decoder structure using "
             "stacked self-attention and point-wise, fully connected layers "
             "for both the encoder and decoder."
         ),
     ),
-    DocumentChunk(
+    PaperChunk(
         chunk_id="chunk-001-results",
         paper_id="paper-001",
-        section="Results",
+        section_id="sec-chunk-001-results",
+        section_title="Results",
+        section_type=SectionType.RESULTS,
         text=(
             "On the WMT 2014 English-to-German translation task, the big "
             "transformer model outperforms the best previously reported models "
@@ -240,10 +240,12 @@ _CHUNKS: list[DocumentChunk] = [
         ),
     ),
     # Paper 002 — BERT
-    DocumentChunk(
+    PaperChunk(
         chunk_id="chunk-002-intro",
         paper_id="paper-002",
-        section="Introduction",
+        section_id="sec-chunk-002-intro",
+        section_title="Introduction",
+        section_type=SectionType.INTRODUCTION,
         text=(
             "Language model pre-training has been shown to be effective for "
             "improving many natural language processing tasks. These include "
@@ -252,10 +254,12 @@ _CHUNKS: list[DocumentChunk] = [
             "recognition and question answering."
         ),
     ),
-    DocumentChunk(
+    PaperChunk(
         chunk_id="chunk-002-pretrain",
         paper_id="paper-002",
-        section="Pre-training BERT",
+        section_id="sec-chunk-002-pretrain",
+        section_title="Pre-training BERT",
+        section_type=SectionType.METHODS,
         text=(
             "We pre-train BERT using two unsupervised tasks. The first task "
             "is Masked Language Model (MLM). The second task is Next Sentence "
@@ -263,10 +267,12 @@ _CHUNKS: list[DocumentChunk] = [
         ),
     ),
     # Paper 003 — GPT-3
-    DocumentChunk(
+    PaperChunk(
         chunk_id="chunk-003-intro",
         paper_id="paper-003",
-        section="Introduction",
+        section_id="sec-chunk-003-intro",
+        section_title="Introduction",
+        section_type=SectionType.INTRODUCTION,
         text=(
             "Recent work has demonstrated substantial gains on many NLP tasks "
             "and benchmarks by pre-training on a large corpus of text followed "
@@ -274,20 +280,24 @@ _CHUNKS: list[DocumentChunk] = [
             "up the language model in terms of parameters and training data."
         ),
     ),
-    DocumentChunk(
+    PaperChunk(
         chunk_id="chunk-003-approach",
         paper_id="paper-003",
-        section="Approach",
+        section_id="sec-chunk-003-approach",
+        section_title="Approach",
+        section_type=SectionType.METHODS,
         text=(
             "Our approach uses in-context learning where the model is given a "
             "natural language instruction and a few demonstrations of the task "
             "and is then expected to complete further instances of the task."
         ),
     ),
-    DocumentChunk(
+    PaperChunk(
         chunk_id="chunk-003-limits",
         paper_id="paper-003",
-        section="Limitations",
+        section_id="sec-chunk-003-limits",
+        section_title="Limitations",
+        section_type=SectionType.LIMITATIONS,
         text=(
             "GPT-3 has several notable limitations. First, text generation can "
             "sometimes be repetitive. Second, the model's performance on "
@@ -296,10 +306,12 @@ _CHUNKS: list[DocumentChunk] = [
         ),
     ),
     # Paper 004 — ViT
-    DocumentChunk(
+    PaperChunk(
         chunk_id="chunk-004-intro",
         paper_id="paper-004",
-        section="Introduction",
+        section_id="sec-chunk-004-intro",
+        section_title="Introduction",
+        section_type=SectionType.INTRODUCTION,
         text=(
             "Self-attention-based architectures, in particular Transformers, "
             "have become the model of choice in natural language processing. "
@@ -307,10 +319,12 @@ _CHUNKS: list[DocumentChunk] = [
             "a standard Transformer directly to images."
         ),
     ),
-    DocumentChunk(
+    PaperChunk(
         chunk_id="chunk-004-vit",
         paper_id="paper-004",
-        section="Vision Transformer",
+        section_id="sec-chunk-004-vit",
+        section_title="Vision Transformer",
+        section_type=SectionType.MODEL,
         text=(
             "We split an image into fixed-size patches, linearly embed each "
             "of them, add position embeddings, and feed the resulting sequence "
@@ -320,10 +334,12 @@ _CHUNKS: list[DocumentChunk] = [
         ),
     ),
     # Paper 005 — RAG
-    DocumentChunk(
+    PaperChunk(
         chunk_id="chunk-005-intro",
         paper_id="paper-005",
-        section="Introduction",
+        section_id="sec-chunk-005-intro",
+        section_title="Introduction",
+        section_type=SectionType.INTRODUCTION,
         text=(
             "Pre-trained neural language models have been shown to learn a "
             "substantial amount of in-depth knowledge from data. However, "
@@ -333,10 +349,12 @@ _CHUNKS: list[DocumentChunk] = [
             "retrieval from a document index."
         ),
     ),
-    DocumentChunk(
+    PaperChunk(
         chunk_id="chunk-005-rag",
         paper_id="paper-005",
-        section="RAG Models",
+        section_id="sec-chunk-005-rag",
+        section_title="RAG Models",
+        section_type=SectionType.MODEL,
         text=(
             "We combine a pre-trained sequence-to-sequence model with a "
             "dense retrieval component based on Dense Passage Retrieval (DPR). "
@@ -345,10 +363,12 @@ _CHUNKS: list[DocumentChunk] = [
             "for the generator."
         ),
     ),
-    DocumentChunk(
+    PaperChunk(
         chunk_id="chunk-005-exp",
         paper_id="paper-005",
-        section="Experiments",
+        section_id="sec-chunk-005-exp",
+        section_title="Experiments",
+        section_type=SectionType.EXPERIMENTS,
         text=(
             "RAG achieves state-of-the-art results on open-domain question "
             "answering benchmarks including Natural Questions, TriviaQA, and "
@@ -359,44 +379,62 @@ _CHUNKS: list[DocumentChunk] = [
 ]
 
 # Index for fast lookup
-_PAPERS_BY_ID: dict[str, Paper] = {p.paper_id: p for p in _PAPERS}
-_CHUNKS_BY_PAPER: dict[str, list[DocumentChunk]] = {}
-_CHUNKS_BY_ID: dict[str, DocumentChunk] = {}
-for _c in _CHUNKS:
-    _CHUNKS_BY_PAPER.setdefault(_c.paper_id, []).append(_c)
-    _CHUNKS_BY_ID[_c.chunk_id] = _c
 
 
-class StubCorpusStore:
+def sample_papers() -> list[Paper]:
+    return [p.model_copy(deep=True) for p in _PAPERS]
+
+
+def sample_chunks() -> list[PaperChunk]:
+    return [c.model_copy(deep=True) for c in _CHUNKS]
+
+
+def make_sample_corpus(**kwargs) -> RunCorpus:
+    """RunCorpus over the sample papers and chunks (kwargs go to RunCorpus)."""
+    return RunCorpus(sample_papers(), sample_chunks(), run_id=kwargs.pop("run_id", "run-sample"), **kwargs)
+
+
+EMBEDDING_DIM = 128
+
+
+class FakeEmbeddingProvider:
     """
-    Deterministic in-memory corpus store for development and testing.
-
-    Contains 5 academic papers with 13 total document chunks.
-    All data is hard-coded and fully reproducible across runs.
-
-    Satisfies the ``CorpusStore`` protocol (app.domain.interfaces).
-
-    .. warning::
-        **Development stub.**  Will be replaced by a real database-backed
-        implementation when corpus storage (Phase 3+) is implemented.
+    Deterministic embedding provider: SHA-256 of the text expanded to
+    ``dim`` floats and L2-normalised.  Same text → same vector; no API calls.
+    Satisfies the EmbeddingProvider protocol.
     """
 
-    def get_all_chunks(self) -> list[DocumentChunk]:
-        """Return all document chunks in the mock corpus."""
-        return list(_CHUNKS)
+    def __init__(self, dim: int = EMBEDDING_DIM) -> None:
+        self._dim = dim
+        self.embed_calls = 0
+        self.batch_calls: list[int] = []
 
-    def get_chunks_by_paper_id(self, paper_id: str) -> list[DocumentChunk]:
-        """Return chunks belonging to a specific paper."""
-        return list(_CHUNKS_BY_PAPER.get(paper_id, []))
+    @property
+    def dimension(self) -> int:
+        return self._dim
 
-    def get_paper_by_id(self, paper_id: str) -> Optional[Paper]:
-        """Return a paper by ID, or None if not found."""
-        return _PAPERS_BY_ID.get(paper_id)
+    def get_model_name(self) -> str:
+        return "fake-hash-embedding"
 
-    def get_all_papers(self) -> list[Paper]:
-        """Return all papers in the mock corpus."""
-        return list(_PAPERS)
+    def get_dimension(self) -> int:
+        return self._dim
 
-    def get_chunk_by_id(self, chunk_id: str) -> Optional[DocumentChunk]:
-        """Return a chunk by ID, or None if not found."""
-        return _CHUNKS_BY_ID.get(chunk_id)
+    def embed(self, text: str) -> list[float]:
+        self.embed_calls += 1
+        return self._hash_to_vector(text)
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        self.batch_calls.append(len(texts))
+        return [self._hash_to_vector(t) for t in texts]
+
+    async def embed_text(self, text: str) -> list[float]:
+        return self._hash_to_vector(text)
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._hash_to_vector(t) for t in texts]
+
+    def _hash_to_vector(self, text: str) -> list[float]:
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        raw = [(digest[i % len(digest)] / 127.5) - 1.0 for i in range(self._dim)]
+        norm = math.sqrt(sum(x * x for x in raw))
+        return [x / norm for x in raw] if norm > 0 else raw

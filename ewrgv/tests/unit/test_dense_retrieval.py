@@ -13,17 +13,17 @@ Verifies:
 
 from __future__ import annotations
 
+from app.domain.models.paper_chunk import PaperChunk
 from app.retrieval.semantic import DenseRetriever
-from app.stubs.stub_corpus import StubCorpusStore
-from app.stubs.stub_text_representation import StubEmbeddingProvider
+from tests.fixtures.sample_corpus import FakeEmbeddingProvider, make_sample_corpus
 
 
 class TestDenseRetriever:
     """Tests for dense/semantic retrieval."""
 
     def setup_method(self) -> None:
-        self.corpus = StubCorpusStore()
-        self.embedder = StubEmbeddingProvider()
+        self.corpus = make_sample_corpus()
+        self.embedder = FakeEmbeddingProvider()
         self.retriever = DenseRetriever(
             embedding_provider=self.embedder,
             corpus_store=self.corpus,
@@ -105,14 +105,16 @@ class TestDenseRetriever:
     # Retriever interface compatibility
     # ------------------------------------------------------------------ #
 
-    def test_retrieve_returns_document_chunks(self) -> None:
-        """The retrieve() method returns DocumentChunk objects."""
+    def test_retrieve_returns_paper_chunks(self) -> None:
+        """The retrieve() method returns the corpus's PaperChunk objects."""
         chunks = self.retriever.retrieve("Transformer", top_k=3)
         assert len(chunks) > 0
         for c in chunks:
-            assert hasattr(c, "chunk_id")
-            assert hasattr(c, "paper_id")
-            assert hasattr(c, "text")
+            assert isinstance(c, PaperChunk)
+            assert self.corpus.get_chunk_by_id(c.chunk_id) is c
+
+    def test_empty_query_returns_nothing(self) -> None:
+        assert self.retriever.retrieve_results("   ", top_k=5) == []
 
     # ------------------------------------------------------------------ #
     # Cache
@@ -124,3 +126,34 @@ class TestDenseRetriever:
         self.retriever.clear_cache()
         r2 = self.retriever.retrieve_results("test", top_k=3)
         assert [r.chunk_id for r in r1] == [r.chunk_id for r in r2]
+
+
+class TestStoredEmbeddings:
+    """Stored chunk_embeddings are used; only missing chunks are embedded."""
+
+    def test_uses_stored_vectors_and_embeds_only_missing(self) -> None:
+        embedder = FakeEmbeddingProvider()
+        base = make_sample_corpus()
+        chunks = base.get_all_chunks()
+        stored = {c.chunk_id: embedder.embed(c.text) for c in chunks[:10]}
+        embedder.embed_calls = 0
+        corpus = make_sample_corpus(embeddings=stored)
+        retriever = DenseRetriever(embedding_provider=embedder, corpus_store=corpus)
+
+        results = retriever.retrieve_results("Transformer", top_k=100)
+
+        assert len(results) == len(chunks)
+        assert embedder.batch_calls == [3]  # the 3 chunks without a stored vector
+        assert embedder.embed_calls == 1  # the query
+
+    def test_stored_vector_drives_score(self) -> None:
+        """A stored vector equal to the query vector ranks that chunk first."""
+        embedder = FakeEmbeddingProvider()
+        query = "completely unrelated query text"
+        target = make_sample_corpus().get_all_chunks()[-1]
+        corpus = make_sample_corpus(embeddings={target.chunk_id: embedder.embed(query)})
+        retriever = DenseRetriever(embedding_provider=embedder, corpus_store=corpus)
+
+        top = retriever.retrieve_results(query, top_k=1)[0]
+        assert top.chunk_id == target.chunk_id
+        assert top.score == 1.0 or abs(top.score - 1.0) < 1e-9

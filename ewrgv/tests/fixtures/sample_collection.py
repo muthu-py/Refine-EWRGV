@@ -16,7 +16,9 @@ Expected corpus: 7 records → 5 unique papers → 3 chunks
 from __future__ import annotations
 
 from app.domain.models.collection import CollectedPaper, CollectionResult, PaperProvenance
+from app.domain.enums import SectionType
 from app.domain.models.paper import Author, Paper
+from app.domain.models.paper_chunk import PaperChunk
 
 QUERY_ID = "run-test-001"
 Q_MAIN = "graph neural network CAN bus intrusion detection"
@@ -35,10 +37,11 @@ TRANSFER_ABSTRACT = (
 )
 GRID_ABSTRACT = "We forecast electricity load with federated learning across utilities."
 
-# Expected chunk IDs (representative paper_id + ":abstract")
-CAN_GNN_CHUNK = "s2-can-gnn:abstract"
-TRANSFER_CHUNK = "oa-transfer:abstract"
-GRID_CHUNK = "s2-grid:abstract"
+# Chunk IDs of the processed run corpus (make_run_corpus)
+CAN_GNN_CHUNK = "can-gnn-limitations"
+CAN_GNN_RESULTS_CHUNK = "can-gnn-results"
+TRANSFER_CHUNK = "transfer-future-work"
+GRID_CHUNK = "grid-methods"
 
 
 def _cp(paper_id, title, abstract, source, provider_id, query, doi=None, year=2023,
@@ -87,3 +90,40 @@ def make_collection_result() -> CollectionResult:
         ],
         status="success",
     )
+
+
+def _pc(chunk_id, paper_id, title, section_type, text, page) -> PaperChunk:
+    return PaperChunk(
+        chunk_id=chunk_id,
+        paper_id=paper_id,
+        section_id=f"{paper_id}-{section_type.value.lower()}",
+        section_title=title,
+        section_type=section_type,
+        text=text,
+        page_start=page,
+        page_end=page,
+        character_count=len(text),
+    )
+
+
+def make_run_chunks() -> list[PaperChunk]:
+    """Full-text PaperChunks as /chunks would produce for the deduplicated papers."""
+    return [
+        _pc(CAN_GNN_CHUNK, "s2-can-gnn", "5 Limitations", SectionType.LIMITATIONS,
+            "Our graph neural network for CAN bus intrusion detection is evaluated on a "
+            "single public dataset from one vehicle model; real-time embedded hardware "
+            "evaluation is left for future work.", 7),
+        _pc(CAN_GNN_RESULTS_CHUNK, "s2-can-gnn", "4 Results", SectionType.RESULTS,
+            "The graph neural network detects CAN bus injection attacks with 99% accuracy.", 5),
+        _pc(TRANSFER_CHUNK, "oa-transfer", "6 Future Work", SectionType.FUTURE_WORK,
+            "Transfer learning for in-vehicle network anomaly detection should be evaluated "
+            "on real traffic from several vehicle manufacturers, not simulated traffic.", 9),
+        _pc(GRID_CHUNK, "s2-grid", "3 Methods", SectionType.METHODS,
+            "We forecast electricity load with federated learning across utilities.", 3),
+    ]
+
+
+def make_run_papers() -> list[Paper]:
+    """The papers of the run (deduplicated representatives) as stored in ``papers``."""
+    keep = {"s2-can-gnn", "oa-transfer", "s2-grid"}
+    return [cp.paper for cp in make_collection_result().papers if cp.paper.paper_id in keep]

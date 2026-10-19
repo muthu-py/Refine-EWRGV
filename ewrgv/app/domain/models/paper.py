@@ -1,7 +1,9 @@
 """
 app/domain/models/paper.py
 --------------------------
-Domain models for academic papers and their processed document chunks.
+Domain model for academic papers.
+
+Chunks are modelled by PaperChunk (app.domain.models.paper_chunk).
 
 These models represent the *core literature corpus* entities in EWRGV.
 They carry only the information that is meaningful at the domain level;
@@ -91,30 +93,3 @@ class Paper(BaseModel):
     citation_count: Optional[int] = None
     publication_year: Optional[int] = None
 
-
-class DocumentChunk(BaseModel):
-    """
-    A processed text chunk derived from a Paper.
-
-    Papers are split into chunks during the document-processing stage.
-    Each chunk is the atomic unit that is embedded, indexed, and retrieved.
-
-    Attributes
-    ----------
-    chunk_id:
-        Unique identifier for this chunk.
-    paper_id:
-        Reference back to the parent Paper.
-    section:
-        The section heading this chunk was extracted from.
-    text:
-        The actual text content of the chunk.
-    metadata:
-        Chunk-level metadata (e.g. chunk index, character offsets).
-    """
-
-    chunk_id: str = Field(default_factory=lambda: str(uuid4()))
-    paper_id: str
-    section: str = ""
-    text: str
-    metadata: dict = Field(default_factory=dict)

@@ -14,14 +14,16 @@ Verifies:
 from __future__ import annotations
 
 from app.retrieval.bm25 import SparseRetriever
-from app.stubs.stub_corpus import StubCorpusStore
+from app.domain.models.paper_chunk import PaperChunk
+from app.retrieval.bm25_index import BM25Index
+from tests.fixtures.sample_corpus import make_sample_corpus, sample_chunks
 
 
 class TestSparseRetriever:
     """Tests for BM25 sparse retrieval."""
 
     def setup_method(self) -> None:
-        self.corpus = StubCorpusStore()
+        self.corpus = make_sample_corpus()
         self.retriever = SparseRetriever(corpus_store=self.corpus)
 
     # ------------------------------------------------------------------ #
@@ -128,13 +130,22 @@ class TestSparseRetriever:
     # Retriever interface
     # ------------------------------------------------------------------ #
 
-    def test_retrieve_returns_document_chunks(self) -> None:
-        """The retrieve() method returns DocumentChunk objects."""
-        chunks = self.retriever.retrieve("Transformer", top_k=3)
+    def test_retrieve_returns_paper_chunks(self) -> None:
+        """The retrieve() method returns the corpus's PaperChunk objects."""
+        chunks = self.retriever.retrieve("Transformer encoder decoder", top_k=3)
         assert len(chunks) > 0
         for c in chunks:
-            assert hasattr(c, "chunk_id")
-            assert hasattr(c, "text")
+            assert isinstance(c, PaperChunk)
+            assert c is self.corpus.get_chunk_by_id(c.chunk_id)
+
+    def test_results_carry_section_and_paper_provenance(self) -> None:
+        """Results expose the chunk's section type, pages and paper fields."""
+        results = self.retriever.retrieve_results("limitations", top_k=5)
+        hit = next(r for r in results if r.chunk_id == "chunk-003-limits")
+        assert hit.section_type == "LIMITATIONS"
+        assert hit.page_start >= 1
+        assert hit.metadata["title"] == self.corpus.get_paper_by_id(hit.paper_id).title
+        assert hit.metadata["publication_year"] == 2020
 
     # ------------------------------------------------------------------ #
     # Index management
@@ -146,3 +157,37 @@ class TestSparseRetriever:
         self.retriever.clear_index()
         r2 = self.retriever.retrieve_results("attention", top_k=5)
         assert [r.chunk_id for r in r1] == [r.chunk_id for r in r2]
+
+
+class TestSparseRetrieverIndex:
+    """The retriever uses the run's persisted BM25 index when available."""
+
+    def test_uses_corpus_index(self) -> None:
+        index = BM25Index().build(sample_chunks())
+        corpus = make_sample_corpus(bm25_index=index)
+        retriever = SparseRetriever(corpus_store=corpus)
+        retriever.retrieve_results("attention", top_k=3)
+        assert retriever._ensure_index() is index
+
+    def test_explicit_index_matches_built_index(self) -> None:
+        corpus = make_sample_corpus()
+        explicit = SparseRetriever(corpus, bm25_index=BM25Index().build(sample_chunks()))
+        built = SparseRetriever(corpus)
+        q = "pre-training bidirectional representations"
+        assert [r.chunk_id for r in explicit.retrieve_results(q, 5)] == [
+            r.chunk_id for r in built.retrieve_results(q, 5)
+        ]
+
+    def test_index_entries_missing_from_corpus_are_skipped(self) -> None:
+        """A stale index (chunks re-generated since) never returns unknown chunks."""
+        stale = sample_chunks()
+        stale[0] = stale[0].model_copy(update={"chunk_id": "gone"})
+        retriever = SparseRetriever(make_sample_corpus(), bm25_index=BM25Index().build(stale))
+        results = retriever.retrieve_results("recurrent neural networks sequence modeling", 10)
+        assert "gone" not in {r.chunk_id for r in results}
+
+    def test_empty_corpus(self) -> None:
+        from app.ingestion.corpus.run_corpus import RunCorpus
+
+        retriever = SparseRetriever(RunCorpus([], []))
+        assert retriever.retrieve_results("anything", 5) == []

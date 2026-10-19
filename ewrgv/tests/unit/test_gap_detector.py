@@ -16,7 +16,7 @@ Test coverage
 * Gap-type mapping (exact, alias, unknown → OTHER)
 * Candidate and chunk caps
 * Prompt grounding (chunk IDs present; only selected chunks sent)
-* Stub-corpus chunks as input
+* Run-corpus (PaperChunk) chunks as input
 """
 
 from __future__ import annotations
@@ -29,11 +29,12 @@ import pytest
 from app.core.exceptions import GapDetectionError, ProviderError
 from app.domain.enums import GapType
 from app.domain.models.candidate_gap import CandidateGap, StructuredGapRepresentation
-from app.domain.models.paper import DocumentChunk
+from app.domain.models.paper_chunk import PaperChunk
 from app.domain.models.query import ResearchQuery
 from app.domain.models.query_understanding import QueryUnderstanding
 from app.gap_detection.detector import GapDetector, map_gap_type, resolve_chunk_id
-from app.stubs.stub_corpus import StubCorpusStore
+from tests.fixtures.sample_corpus import make_sample_corpus
+from tests.fixtures.sample_data import make_chunk
 
 # ------------------------------------------------------------------ #
 # Helpers
@@ -51,21 +52,21 @@ def _make_detector(
     return GapDetector(mock_llm, **kwargs), mock_llm
 
 
-def _chunks() -> list[DocumentChunk]:
+def _chunks() -> list[PaperChunk]:
     return [
-        DocumentChunk(
+        make_chunk(
             chunk_id="c1",
             paper_id="p1",
             section="Limitations",
             text="Our evaluation covers only English benchmarks.",
         ),
-        DocumentChunk(
+        make_chunk(
             chunk_id="c2",
             paper_id="p2",
             section="Future Work",
             text="Extending the approach to low-resource languages remains open.",
         ),
-        DocumentChunk(
+        make_chunk(
             chunk_id="c3",
             paper_id="p1",
             section="Results",
@@ -163,8 +164,8 @@ class TestGapDetectorValid:
         detector, _ = _make_detector({"candidate_gaps": [_gap(initial_confidence=1.7)]})
         assert detector.detect(QUERY, _chunks())[0].initial_confidence == 1.0
 
-    def test_works_on_stub_corpus_chunks(self):
-        chunks = StubCorpusStore().get_all_chunks()
+    def test_works_on_run_corpus_chunks(self):
+        chunks = make_sample_corpus().get_all_chunks()
         detector, mock_llm = _make_detector(
             {"candidate_gaps": [_gap(supporting_chunk_ids=["chunk-003-limits"])]}
         )
@@ -172,7 +173,7 @@ class TestGapDetectorValid:
         assert gap.source_papers == ["paper-003"]
         prompt = mock_llm.complete_structured.call_args.args[0]
         assert "[chunk_id: chunk-003-limits]" in prompt
-        assert "section: Limitations" in prompt
+        assert "section: Limitations [LIMITATIONS]" in prompt
 
 
 # ======================================================================
@@ -227,7 +228,7 @@ class TestGapDetectorEmptyInput:
 
     def test_blank_text_chunks_treated_as_empty(self):
         detector, mock_llm = _make_detector({"candidate_gaps": [_gap()]})
-        blank = [DocumentChunk(chunk_id="b", paper_id="p", text="   ")]
+        blank = [make_chunk(chunk_id="b", paper_id="p", text="   ")]
         assert detector.detect(QUERY, blank) == []
         mock_llm.complete_structured.assert_not_called()
 
@@ -336,7 +337,7 @@ class TestGapDetectorMappingAndCaps:
         assert "- Methods: BERT" in prompt
 
     def test_long_chunk_truncated_in_prompt(self):
-        long_chunk = DocumentChunk(chunk_id="long", paper_id="p", text="x" * 500)
+        long_chunk = make_chunk(chunk_id="long", paper_id="p", text="x" * 500)
         detector, mock_llm = _make_detector({"candidate_gaps": []}, max_chunk_chars=100)
         detector.detect(QUERY, [long_chunk])
         prompt = mock_llm.complete_structured.call_args.args[0]

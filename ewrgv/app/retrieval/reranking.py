@@ -16,7 +16,7 @@ Status: SKELETON – interface is correct, implementation pending.
 from __future__ import annotations
 
 from app.core.logging import get_logger
-from app.domain.models.paper import DocumentChunk
+from app.domain.models.paper_chunk import PaperChunk
 
 logger = get_logger(__name__)
 
@@ -36,9 +36,9 @@ class CrossEncoderReranker:
     def rerank(
         self,
         query: str,
-        chunks: list[DocumentChunk],
+        chunks: list[PaperChunk],
         top_n: int = 10,
-    ) -> list[DocumentChunk]:
+    ) -> list[PaperChunk]:
         """
         Rerank chunks by relevance to the query.
         NOT YET IMPLEMENTED — returns input list truncated to top_n.

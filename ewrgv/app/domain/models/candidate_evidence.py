@@ -24,8 +24,9 @@ class CandidateEvidenceItem(BaseModel):
 
     Attributes
     ----------
-    chunk_id, paper_id, section:
-        Reference to the retrieved passage.
+    chunk_id, paper_id, section, section_type, page_start, page_end:
+        Reference to the retrieved passage (section title, SectionType
+        value and PDF page range from the PaperChunk).
     stance:
         ``EvidenceType.SUPPORTING`` (indicates the gap exists, e.g. a stated
         limitation) or ``EvidenceType.COUNTER`` (suggests it is addressed).
@@ -46,6 +47,9 @@ class CandidateEvidenceItem(BaseModel):
     chunk_id: str
     paper_id: str
     section: str = ""
+    section_type: Optional[str] = None
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
     stance: EvidenceType
     relevance: float
     quality: Optional[float] = None

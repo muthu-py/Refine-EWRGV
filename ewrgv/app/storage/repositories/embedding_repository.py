@@ -110,6 +110,26 @@ class EmbeddingRepository:
             count = await conn.fetchval(query, paper_id, embedding_model)
             return count or 0
 
+    async def get_embeddings_for_papers(
+        self, paper_ids: list[str], embedding_model: str
+    ) -> dict[str, list[float]]:
+        """
+        Load stored embeddings for the given papers, keyed by chunk_id.
+
+        Used by dense retrieval so that only the query has to be embedded.
+        """
+        if not paper_ids:
+            return {}
+
+        query = """
+            SELECT chunk_id, embedding::text AS embedding
+            FROM chunk_embeddings
+            WHERE paper_id = ANY($1) AND embedding_model = $2
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, paper_ids, embedding_model)
+        return {row["chunk_id"]: json.loads(row["embedding"]) for row in rows}
+
     async def delete_embeddings(self, chunk_ids: list[str], embedding_model: str) -> None:
         """
         Delete specific embeddings. Useful for rebuilds or cleanup.

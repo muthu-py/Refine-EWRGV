@@ -9,11 +9,15 @@ No external services are called.
 
 from __future__ import annotations
 
-from app.domain.enums import EvidenceType, GapType
+from typing import Optional
+
+from app.domain.enums import EvidenceType, GapType, SectionType
 from app.domain.models.candidate_gap import CandidateGap, StructuredGapRepresentation
 from app.domain.models.evidence import Evidence, Provenance
-from app.domain.models.paper import Author, DocumentChunk, Paper
+from app.domain.models.paper import Author, Paper
+from app.domain.models.paper_chunk import PaperChunk
 from app.domain.models.query import ResearchQuery
+from app.ingestion.sectioning.classifier import classify
 
 
 def make_paper(
@@ -33,12 +37,24 @@ def make_chunk(
     paper_id: str = "paper-001",
     text: str = "The Transformer relies entirely on attention mechanisms.",
     section: str = "Introduction",
-) -> DocumentChunk:
-    return DocumentChunk(
+    chunk_id: Optional[str] = None,
+    section_type: Optional[SectionType] = None,
+    **kwargs,
+) -> PaperChunk:
+    """A PaperChunk whose section_type is classified from ``section`` like the real pipeline."""
+    if section_type is None:
+        section_type = classify(section) if section else SectionType.UNKNOWN
+    fields = dict(
         paper_id=paper_id,
+        section_id=f"sec-{paper_id}-{section or 'none'}",
+        section_title=section,
+        section_type=section_type,
         text=text,
-        section=section,
+        **kwargs,
     )
+    if chunk_id is not None:
+        fields["chunk_id"] = chunk_id
+    return PaperChunk(**fields)
 
 
 def make_query(query: str = "What are the gaps in Transformer-based models?") -> ResearchQuery:

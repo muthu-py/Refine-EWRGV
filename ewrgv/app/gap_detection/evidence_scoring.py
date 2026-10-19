@@ -23,15 +23,17 @@ Per evidence item (passage) i:
                   gap_terms = Unicode word tokens (English stop words removed)
                   of the gap statement + its key concepts; lexical, not semantic.
     quality_i   = explicit_section_quality (1.0) if the passage comes from a
-                  Limitations / Future Work / Discussion / Conclusion-type
-                  section, else default_section_quality (0.5).
+                  Limitations / Future Work / Discussion / Conclusion section
+                  (PaperChunk.section_type, or a matching section title when
+                  the type is UNKNOWN/OTHER), else default_section_quality (0.5).
                   Supporting evidence only (it measures how explicitly a
                   passage states the gap).
     recency_i   = max(0, 1 − max(0, reference_year − year_i) / recency_horizon_years)
                   1.0 for the reference year, 0 at horizon age or older; a
                   paper newer than the reference year (only possible with an
                   explicit reference_year) is capped at 1.0.
-                  None when the passage has no publication year.
+                  None when the passage's paper has no publication year
+                  (years come from the paper lookup; PaperChunk has none).
                   reference_year: the configured value if set, otherwise the
                   latest valid year across ALL chunks supplied to the scoring
                   call — one year shared by every candidate in a score_all()
@@ -76,13 +78,14 @@ from collections.abc import Callable, Iterable
 from typing import Optional
 
 from app.core.logging import get_logger
-from app.domain.enums import CandidateEvidenceStatus, EvidenceType
+from app.domain.enums import CandidateEvidenceStatus, EvidenceType, SectionType
 from app.domain.models.candidate_evidence import (
     CandidateEvidenceAssessment,
     CandidateEvidenceItem,
 )
 from app.domain.models.candidate_gap import CandidateGap
-from app.domain.models.paper import DocumentChunk, Paper
+from app.domain.models.paper import Paper
+from app.domain.models.paper_chunk import PaperChunk
 from app.gap_detection.ranking import _normalise_statement, _statement_tokens
 
 logger = get_logger(__name__)
@@ -96,8 +99,18 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "independence": 0.30,
 }
 
-# Section headings (casefolded, matched as substrings) whose passages state
-# limitations / open problems explicitly.
+# Section types whose passages state limitations / open problems explicitly.
+DEFAULT_EXPLICIT_SECTION_TYPES: frozenset[SectionType] = frozenset(
+    {
+        SectionType.LIMITATIONS,
+        SectionType.FUTURE_WORK,
+        SectionType.DISCUSSION,
+        SectionType.CONCLUSION,
+    }
+)
+
+# Fallback for chunks whose section type is UNKNOWN/OTHER: section titles
+# (casefolded, matched as substrings) that state limitations explicitly.
 DEFAULT_EXPLICIT_SECTIONS: tuple[str, ...] = (
     "limitation",
     "future work",
@@ -154,7 +167,8 @@ class CandidateEvidenceScorer:
     explicit_section_quality, default_section_quality:
         Quality values for explicit-limitation sections vs. any other section.
     explicit_sections:
-        Casefolded substrings identifying explicit-limitation sections.
+        Casefolded section-title substrings identifying explicit-limitation
+        sections, used only when a chunk's section_type is UNKNOWN/OTHER.
     """
 
     def __init__(
@@ -217,7 +231,7 @@ class CandidateEvidenceScorer:
     def score_all(
         self,
         gaps: list[CandidateGap],
-        chunks: list[DocumentChunk],
+        chunks: list[PaperChunk],
         paper_lookup: Optional[Callable[[str], Optional[Paper]]] = None,
     ) -> list[CandidateGap]:
         """
@@ -242,13 +256,13 @@ class CandidateEvidenceScorer:
 
     def resolve_reference_year(
         self,
-        chunks: Iterable[DocumentChunk],
+        chunks: Iterable[PaperChunk],
         paper_lookup: Optional[Callable[[str], Optional[Paper]]] = None,
     ) -> Optional[int]:
         """
         The configured ``reference_year`` if set; otherwise the latest valid
-        publication year across ALL supplied chunks (chunk metadata, else the
-        paper lookup).  ``None`` when no chunk has a year.
+        publication year across ALL supplied chunks (via the paper lookup).
+        ``None`` when no chunk has a year.
         """
         if self._reference_year is not None:
             return self._reference_year
@@ -258,7 +272,7 @@ class CandidateEvidenceScorer:
     def score(
         self,
         gap: CandidateGap,
-        chunks_by_id: dict[str, DocumentChunk],
+        chunks_by_id: dict[str, PaperChunk],
         paper_lookup: Optional[Callable[[str], Optional[Paper]]] = None,
         reference_year: Optional[int] = None,
     ) -> CandidateEvidenceAssessment:
@@ -274,8 +288,8 @@ class CandidateEvidenceScorer:
         gap_terms = self._gap_terms(gap)
         missing: list[str] = []
 
-        def collect(chunk_ids: list[str], exclude: set[str]) -> list[DocumentChunk]:
-            found: list[DocumentChunk] = []
+        def collect(chunk_ids: list[str], exclude: set[str]) -> list[PaperChunk]:
+            found: list[PaperChunk] = []
             for cid in dict.fromkeys(chunk_ids):
                 if cid in exclude:
                     continue
@@ -375,11 +389,8 @@ class CandidateEvidenceScorer:
 
     @staticmethod
     def _year(
-        chunk: DocumentChunk, paper_lookup: Optional[Callable[[str], Optional[Paper]]]
+        chunk: PaperChunk, paper_lookup: Optional[Callable[[str], Optional[Paper]]]
     ) -> Optional[int]:
-        year = chunk.metadata.get("publication_year")
-        if isinstance(year, int) and not isinstance(year, bool):
-            return year
         if paper_lookup is not None:
             paper = paper_lookup(chunk.paper_id)
             if paper is not None:
@@ -389,10 +400,13 @@ class CandidateEvidenceScorer:
                     return paper.publication_date.year
         return None
 
-    def _quality(self, section: str) -> float:
-        heading = (section or "").casefold()
-        if any(marker in heading for marker in self._explicit_sections):
+    def _quality(self, chunk: PaperChunk) -> float:
+        if chunk.section_type in DEFAULT_EXPLICIT_SECTION_TYPES:
             return self._explicit_quality
+        if chunk.section_type in (SectionType.UNKNOWN, SectionType.OTHER):
+            heading = (chunk.section_title or "").casefold()
+            if any(marker in heading for marker in self._explicit_sections):
+                return self._explicit_quality
         return self._default_quality
 
     def _recency(self, year: Optional[int], reference_year: Optional[int]) -> Optional[float]:
@@ -403,7 +417,7 @@ class CandidateEvidenceScorer:
 
     def _item(
         self,
-        chunk: DocumentChunk,
+        chunk: PaperChunk,
         stance: EvidenceType,
         gap_terms: frozenset[str],
         year: Optional[int],
@@ -412,7 +426,7 @@ class CandidateEvidenceScorer:
     ) -> CandidateEvidenceItem:
         passage_terms = _terms(chunk.text)
         relevance = len(gap_terms & passage_terms) / len(gap_terms) if gap_terms else 0.0
-        quality = self._quality(chunk.section) if stance == EvidenceType.SUPPORTING else None
+        quality = self._quality(chunk) if stance == EvidenceType.SUPPORTING else None
         recency = self._recency(year, reference_year)
         item_weights = {f: self._weights[f] for f in ("relevance", "quality", "recency")}
         strength = _weighted_mean(
@@ -422,15 +436,18 @@ class CandidateEvidenceScorer:
         return CandidateEvidenceItem(
             chunk_id=chunk.chunk_id,
             paper_id=chunk.paper_id,
-            section=chunk.section,
+            section=chunk.section_title,
+            section_type=chunk.section_type.value,
+            page_start=chunk.page_start,
+            page_end=chunk.page_end,
             stance=stance,
             relevance=round(relevance, 6),
             quality=quality,
             recency=None if recency is None else round(recency, 6),
             strength=round(strength, 6),
             publication_year=year,
-            title=chunk.metadata.get("title") or (paper.title if paper else None),
-            doi=chunk.metadata.get("doi") or (paper.doi if paper else None),
+            title=paper.title if paper else None,
+            doi=paper.doi if paper else None,
             citation_count=paper.citation_count if paper else None,
         )
 

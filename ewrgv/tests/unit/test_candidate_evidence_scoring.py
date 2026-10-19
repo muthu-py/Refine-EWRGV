@@ -27,25 +27,32 @@ import pytest
 
 from app.domain.enums import CandidateEvidenceStatus, EvidenceType
 from app.domain.models.candidate_gap import CandidateGap, StructuredGapRepresentation
-from app.domain.models.paper import DocumentChunk
+from app.domain.models.paper import Paper
+from app.domain.models.paper_chunk import PaperChunk
 from app.gap_detection.evidence_scoring import DEFAULT_WEIGHTS, CandidateEvidenceScorer
 from app.gap_detection.ranking import CandidateRanker
-from app.stubs.stub_corpus import StubCorpusStore
+from tests.fixtures.sample_corpus import make_sample_corpus
+from tests.fixtures.sample_data import make_chunk
 
 STATEMENT = "alpha beta gamma delta"
 
+# Publication year and title live on the Paper, not the chunk; tests register
+# each chunk's paper here and pass LOOKUP as the scorer's paper_lookup.
+PAPERS: dict[str, Paper] = {}
+LOOKUP = PAPERS.get
 
-def _chunks() -> dict[str, DocumentChunk]:
+
+def _chunk(cid: str, pid: str, section: str, text: str, year=None, title=None) -> PaperChunk:
+    PAPERS[pid] = Paper(paper_id=pid, title=title or f"Paper {pid}", publication_year=year)
+    return make_chunk(chunk_id=cid, paper_id=pid, section=section, text=text)
+
+
+def _chunks() -> dict[str, PaperChunk]:
     chunks = [
-        DocumentChunk(chunk_id="c1", paper_id="p1", section="Limitations",
-                      text="alpha beta gamma delta", metadata={"publication_year": 2020,
-                                                               "title": "Paper One"}),
-        DocumentChunk(chunk_id="c2", paper_id="p2", section="Abstract",
-                      text="alpha beta", metadata={"publication_year": 2010}),
-        DocumentChunk(chunk_id="c3", paper_id="p3", section="Results",
-                      text="alpha beta gamma", metadata={"publication_year": 2020}),
-        DocumentChunk(chunk_id="c4", paper_id="p4", section="Introduction",
-                      text="alpha", metadata={}),
+        _chunk("c1", "p1", "Limitations", "alpha beta gamma delta", year=2020, title="Paper One"),
+        _chunk("c2", "p2", "Abstract", "alpha beta", year=2010),
+        _chunk("c3", "p3", "Results", "alpha beta gamma", year=2020),
+        _chunk("c4", "p4", "Introduction", "alpha"),
     ]
     return {c.chunk_id: c for c in chunks}
 
@@ -60,7 +67,7 @@ def _gap(supporting=("c1", "c2"), contradicting=(), statement=STATEMENT, **kw) -
 
 
 def _score(gap: CandidateGap, **scorer_kwargs):
-    return CandidateEvidenceScorer(**scorer_kwargs).score(gap, _chunks())
+    return CandidateEvidenceScorer(**scorer_kwargs).score(gap, _chunks(), LOOKUP)
 
 
 # ======================================================================
@@ -263,21 +270,21 @@ class TestWeightConfiguration:
 
 
 # ======================================================================
-# score_all, stub corpus, ranking
+# score_all, sample corpus, ranking
 # ======================================================================
 
 
 class TestScoreAllAndRanking:
     def test_score_all_returns_copies(self):
         gap = _gap()
-        [scored] = CandidateEvidenceScorer().score_all([gap], list(_chunks().values()))
+        [scored] = CandidateEvidenceScorer().score_all([gap], list(_chunks().values()), LOOKUP)
         assert gap.evidence_assessment is None
         assert scored.evidence_assessment is not None
         assert scored.gap_id == gap.gap_id
 
-    def test_stub_corpus_with_paper_lookup(self):
-        """Stub chunks carry no year; the paper lookup supplies it."""
-        store = StubCorpusStore()
+    def test_sample_corpus_with_paper_lookup(self):
+        """Chunks carry no year; the paper lookup supplies it."""
+        store = make_sample_corpus()
         gap = _gap(supporting=("chunk-003-limits",),
                    statement="GPT-3 has limitations in structured prediction")
         [scored] = CandidateEvidenceScorer().score_all(
@@ -294,7 +301,7 @@ class TestScoreAllAndRanking:
         strong = _gap(statement="zz strong alpha beta gamma delta", initial_confidence=0.5)
         weak = _gap(statement="aa weak alpha beta gamma delta", initial_confidence=0.5,
                     contradicting=("c3",))
-        scored = CandidateEvidenceScorer().score_all([weak, strong], list(_chunks().values()))
+        scored = CandidateEvidenceScorer().score_all([weak, strong], list(_chunks().values()), LOOKUP)
         ranked = CandidateRanker(diversity_penalty=0).rank(scored, top_k=2)
         assert ranked[0].gap_statement.startswith("zz strong")
         # 2 extra gap terms: relevance c1 4/6, c2 2/6 → mean .5;
@@ -311,7 +318,7 @@ class TestScoreAllAndRanking:
         ranker = CandidateRanker(diversity_penalty=0, evidence_weight=0)
         assert ranker.base_score(supported) == ranker.base_score(unsupported)
         scored = CandidateEvidenceScorer().score_all([unsupported, supported],
-                                                     list(_chunks().values()))
+                                                     list(_chunks().values()), LOOKUP)
         ranked = CandidateRanker(diversity_penalty=0).rank(scored, top_k=2)
         assert ranked[0].gap_statement.startswith("zz supported")
         assert ranked[1].evidence_assessment.status == (
@@ -324,10 +331,9 @@ class TestScoreAllAndRanking:
 # ======================================================================
 
 
-def _dated(cid: str, pid: str, year) -> DocumentChunk:
+def _dated(cid: str, pid: str, year) -> PaperChunk:
     meta = {} if year is None else {"publication_year": year}
-    return DocumentChunk(chunk_id=cid, paper_id=pid, section="Abstract",
-                         text="alpha beta gamma delta", metadata=meta)
+    return _chunk(cid, pid, "Abstract", "alpha beta gamma delta", year=year)
 
 
 class TestSharedReferenceYear:
@@ -352,7 +358,7 @@ class TestSharedReferenceYear:
         return a, b
 
     def test_old_candidate_scored_against_shared_year(self):
-        a, b = CandidateEvidenceScorer().score_all(list(self._pair()), self.CHUNKS)
+        a, b = CandidateEvidenceScorer().score_all(list(self._pair()), self.CHUNKS, LOOKUP)
         assert a.evidence_assessment.features["recency"] == 0.0
         assert a.evidence_assessment.score == pytest.approx(0.58, abs=1e-6)
         assert b.evidence_assessment.features["recency"] == pytest.approx(0.5)
@@ -361,39 +367,39 @@ class TestSharedReferenceYear:
     def test_newer_multi_year_candidate_ranks_first(self):
         # A wins on the heuristic (confidence .9 vs .5); with evidence_weight=1.0
         # the ranking follows the evidence score alone, which favours B.
-        scored = CandidateEvidenceScorer().score_all(list(self._pair()), self.CHUNKS)
+        scored = CandidateEvidenceScorer().score_all(list(self._pair()), self.CHUNKS, LOOKUP)
         ranked = CandidateRanker(diversity_penalty=0, evidence_weight=1.0).rank(scored, 2)
         assert [g.relevant_passages for g in ranked] == [["new", "mid"], ["old", "old2"]]
 
     def test_single_score_call_uses_all_supplied_chunks(self):
         a, _ = self._pair()
-        alone = CandidateEvidenceScorer().score(a, {c.chunk_id: c for c in self.CHUNKS})
+        alone = CandidateEvidenceScorer().score(a, {c.chunk_id: c for c in self.CHUNKS}, LOOKUP)
         assert alone.supporting[0].recency == 0.0  # not 1.0 from its own 1995 paper
 
     def test_resolve_reference_year_automatic(self):
         scorer = CandidateEvidenceScorer()
-        assert scorer.resolve_reference_year(self.CHUNKS) == 2024
-        assert scorer.resolve_reference_year([_dated("x", "p", None)]) is None
+        assert scorer.resolve_reference_year(self.CHUNKS, LOOKUP) == 2024
+        assert scorer.resolve_reference_year([_dated("x", "p", None)], LOOKUP) is None
         assert scorer.resolve_reference_year([]) is None
 
     def test_resolve_reference_year_uses_paper_lookup(self):
-        store = StubCorpusStore()  # stub chunks carry no year; papers do (2017–2021)
+        store = make_sample_corpus()  # chunks carry no year; papers do (2017–2021)
         assert CandidateEvidenceScorer().resolve_reference_year(
             store.get_all_chunks(), store.get_paper_by_id
         ) == 2021
 
     def test_explicit_reference_year_overrides(self):
         scorer = CandidateEvidenceScorer(reference_year=2030)
-        assert scorer.resolve_reference_year(self.CHUNKS) == 2030
-        a, _ = scorer.score_all(list(self._pair()), self.CHUNKS)
+        assert scorer.resolve_reference_year(self.CHUNKS, LOOKUP) == 2030
+        a, _ = scorer.score_all(list(self._pair()), self.CHUNKS, LOOKUP)
         assert a.evidence_assessment.supporting[0].recency == 0.0  # 35 years > horizon
-        b = CandidateEvidenceScorer(reference_year=2024).score_all(list(self._pair()), self.CHUNKS)[1]
+        b = CandidateEvidenceScorer(reference_year=2024).score_all(list(self._pair()), self.CHUNKS, LOOKUP)[1]
         assert [i.recency for i in b.evidence_assessment.supporting] == pytest.approx([1.0, 0.0])
 
     def test_missing_year_still_excluded(self):
         gap = _gap(supporting=("undated",))
         [scored] = CandidateEvidenceScorer().score_all(
-            [gap], self.CHUNKS + [_dated("undated", "p-u", None)]
+            [gap], self.CHUNKS + [_dated("undated", "p-u", None)], LOOKUP
         )
         assert scored.evidence_assessment.supporting[0].recency is None
         assert scored.evidence_assessment.features["recency"] is None
@@ -407,7 +413,7 @@ class TestSharedReferenceYear:
         """recency = max(0, 1 − max(0, reference_year − year) / 10), reference 2020."""
         chunk = _dated("x", "p", paper_year)
         a = CandidateEvidenceScorer(reference_year=2020).score(
-            _gap(supporting=("x",)), {"x": chunk}
+            _gap(supporting=("x",)), {"x": chunk}, LOOKUP
         )
         assert a.supporting[0].recency == pytest.approx(expected)
 
@@ -425,15 +431,13 @@ class TestSharedReferenceYear:
 class TestZeroStrengthCounterEvidence:
     def _chunks(self):
         return {
-            "s": DocumentChunk(chunk_id="s", paper_id="p1", section="Limitations",
-                               text="alpha beta gamma delta", metadata={}),
-            "z": DocumentChunk(chunk_id="z", paper_id="p2", section="Results",
-                               text="completely unrelated words", metadata={}),
+            "s": _chunk("s", "p1", "Limitations", "alpha beta gamma delta"),
+            "z": _chunk("z", "p2", "Results", "completely unrelated words"),
         }
 
     def test_zero_strength_counter_does_not_contest(self):
         gap = _gap(supporting=("s",), contradicting=("z",))
-        a = CandidateEvidenceScorer().score(gap, self._chunks())
+        a = CandidateEvidenceScorer().score(gap, self._chunks(), LOOKUP)
         assert a.contradicting[0].strength == 0.0
         assert a.contradiction_ratio == 0.0
         assert a.score == a.support_score
@@ -443,7 +447,7 @@ class TestZeroStrengthCounterEvidence:
 
     def test_zero_strength_counter_with_no_support(self):
         gap = _gap(supporting=(), contradicting=("z",))
-        a = CandidateEvidenceScorer().score(gap, self._chunks())
+        a = CandidateEvidenceScorer().score(gap, self._chunks(), LOOKUP)
         assert a.status == CandidateEvidenceStatus.INSUFFICIENT_EVIDENCE
         assert a.contradiction_ratio == 0.0
         # Explanation must not claim the zero-strength passage counts against the gap.
@@ -452,19 +456,17 @@ class TestZeroStrengthCounterEvidence:
         assert "suggest the gap may already be addressed" not in a.explanation
 
     def test_mixed_counter_passages_with_no_support(self):
-        chunks = {**self._chunks(), "c": DocumentChunk(
-            chunk_id="c", paper_id="p3", section="Results", text="alpha beta", metadata={})}
-        a = CandidateEvidenceScorer().score(_gap(supporting=(), contradicting=("z", "c")), chunks)
+        chunks = {**self._chunks(), "c": _chunk("c", "p3", "Results", "alpha beta")}
+        a = CandidateEvidenceScorer().score(_gap(supporting=(), contradicting=("z", "c")), chunks, LOOKUP)
         assert a.status == CandidateEvidenceStatus.INSUFFICIENT_EVIDENCE
         assert a.contradiction_ratio == 1.0
         assert "1 passage(s) suggest the gap may already be addressed" in a.explanation
         assert "1 contradicting passage(s) had zero strength" in a.explanation
 
     def test_effective_and_ineffective_counter_passages(self):
-        chunks = {**self._chunks(), "c": DocumentChunk(
-            chunk_id="c", paper_id="p3", section="Results", text="alpha beta", metadata={})}
+        chunks = {**self._chunks(), "c": _chunk("c", "p3", "Results", "alpha beta")}
         gap = _gap(supporting=("s",), contradicting=("z", "c"))
-        a = CandidateEvidenceScorer().score(gap, chunks)
+        a = CandidateEvidenceScorer().score(gap, chunks, LOOKUP)
         assert a.status == CandidateEvidenceStatus.CONTESTED
         assert a.contradiction_ratio > 0
         assert "1 contradicting passage(s) carry" in a.explanation
@@ -489,7 +491,7 @@ class TestPassageLevelWeights:
     def test_counter_evidence_always_measurable(self):
         """With relevance weighted, a counter passage sharing gap terms has strength > 0."""
         a = CandidateEvidenceScorer(weights={"relevance": 0.1, "independence": 1.0}).score(
-            _gap(contradicting=("c3",)), _chunks()
+            _gap(contradicting=("c3",)), _chunks(), LOOKUP
         )
         assert a.contradicting[0].strength > 0
         assert a.contradiction_ratio > 0

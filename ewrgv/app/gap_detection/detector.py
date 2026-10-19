@@ -4,7 +4,7 @@ app/gap_detection/detector.py
 Gap detector: identifies candidate research gaps from retrieved evidence.
 
 The detector satisfies the GapDetector interface (app.domain.interfaces).
-It receives retrieved DocumentChunks and a ResearchQuery, and produces
+It receives retrieved PaperChunks and a ResearchQuery, and produces
 a list of CandidateGap domain objects.
 
 The detected gaps are *unvalidated*.  All downstream confidence and
@@ -12,7 +12,7 @@ classification is the responsibility of the EWRGV validation module.
 
 Flow
 ----
-    ResearchQuery + DocumentChunk[]
+    ResearchQuery + PaperChunk[]
               ↓
     build_gap_detection_prompt()          ← prompts.py
               ↓
@@ -44,7 +44,7 @@ from app.core.logging import get_logger
 from app.domain.enums import GapType
 from app.domain.interfaces import LLMProvider
 from app.domain.models.candidate_gap import CandidateGap
-from app.domain.models.paper import DocumentChunk
+from app.domain.models.paper_chunk import PaperChunk
 from app.domain.models.query import ResearchQuery
 from app.gap_detection.llm_call import call_structured_llm
 from app.gap_detection.prompts import build_gap_detection_prompt
@@ -86,7 +86,7 @@ _CHUNK_ID_WRAPPERS = "[](){}<>\"'`"
 _CHUNK_ID_LABEL_RE = re.compile(r"^(?:chunk[\s_-]?id|id)\s*[:=]\s*", re.IGNORECASE)
 
 
-def resolve_chunk_id(cited: str, supplied: dict[str, DocumentChunk] | set[str]) -> str | None:
+def resolve_chunk_id(cited: str, supplied: dict[str, PaperChunk] | set[str]) -> str | None:
     """
     Resolve a cited chunk ID against the IDs supplied to the LLM.
 
@@ -145,7 +145,7 @@ class GapDetector:
     def detect(
         self,
         query: ResearchQuery,
-        chunks: list[DocumentChunk],
+        chunks: list[PaperChunk],
     ) -> list[CandidateGap]:
         """
         Detect candidate gaps from retrieved chunks.
@@ -212,10 +212,10 @@ class GapDetector:
     # Internal helpers
     # ------------------------------------------------------------------ #
 
-    def _select_chunks(self, chunks: list[DocumentChunk]) -> list[DocumentChunk]:
+    def _select_chunks(self, chunks: list[PaperChunk]) -> list[PaperChunk]:
         """De-duplicate by chunk_id (first occurrence wins) and cap the count."""
         seen: set[str] = set()
-        selected: list[DocumentChunk] = []
+        selected: list[PaperChunk] = []
         for chunk in chunks or []:
             if chunk.chunk_id in seen or not chunk.text.strip():
                 continue
@@ -259,7 +259,7 @@ class GapDetector:
     def _map_to_domain(
         self,
         item: CandidateGapLLMOutput,
-        chunks_by_id: dict[str, DocumentChunk],
+        chunks_by_id: dict[str, PaperChunk],
         query_id: str,
     ) -> CandidateGap | None:
         """Map one validated LLM candidate to a CandidateGap, or None if ungrounded."""
@@ -323,7 +323,7 @@ class GapDetector:
 
     @staticmethod
     def _resolve_ids(
-        cited_ids: list[str], chunks_by_id: dict[str, DocumentChunk]
+        cited_ids: list[str], chunks_by_id: dict[str, PaperChunk]
     ) -> tuple[list[str], list[str]]:
         """Resolve cited IDs against the supplied chunks → (valid, invalid), de-duplicated."""
         valid: list[str] = []

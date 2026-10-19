@@ -17,8 +17,8 @@ Design principles
 
 from __future__ import annotations
 
-from app.domain.enums import GapType
-from app.domain.models.paper import DocumentChunk
+from app.domain.enums import GapType, SectionType
+from app.domain.models.paper_chunk import PaperChunk
 from app.domain.models.query import ResearchQuery
 
 _GAP_TYPE_DESCRIPTIONS: dict[GapType, str] = {
@@ -60,13 +60,15 @@ def _format_query_context(query: ResearchQuery) -> str:
     return "\n".join(lines)
 
 
-def _format_passages(chunks: list[DocumentChunk], max_chunk_chars: int) -> str:
+def _format_passages(chunks: list[PaperChunk], max_chunk_chars: int) -> str:
     blocks = []
     for chunk in chunks:
         text = chunk.text.strip()
         if len(text) > max_chunk_chars:
             text = text[:max_chunk_chars].rstrip() + " …"
-        section = chunk.section or "Unknown section"
+        section = chunk.section_title or "Unknown section"
+        if chunk.section_type != SectionType.UNKNOWN:
+            section = f"{section} [{chunk.section_type.value}]"
         blocks.append(
             f"[chunk_id: {chunk.chunk_id}] (paper: {chunk.paper_id}; section: {section})\n{text}"
         )
@@ -75,7 +77,7 @@ def _format_passages(chunks: list[DocumentChunk], max_chunk_chars: int) -> str:
 
 def build_gap_detection_prompt(
     query: ResearchQuery,
-    chunks: list[DocumentChunk],
+    chunks: list[PaperChunk],
     max_gaps: int,
     max_chunk_chars: int = 1500,
 ) -> str:

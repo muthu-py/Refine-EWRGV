@@ -1,13 +1,14 @@
 """
 app/ingestion/corpus/__init__.py
 ----------------------------------
-In-memory corpus construction from collected literature.
+Retrieval corpus of a research run.
 
 Concrete implementations:
-    CollectionCorpusStore  – CorpusStore built from a CollectionResult
-                             (one title + abstract chunk per unique paper)
+    RunCorpus        – CorpusStore over a run's PaperChunks, stored
+                       embeddings and BM25 index
+    RunCorpusLoader  – builds a RunCorpus from Supabase Storage + PostgreSQL
 """
 
-from app.ingestion.corpus.collection_corpus import CollectionCorpusStore
+from app.ingestion.corpus.run_corpus import RunCorpus, RunCorpusLoader, bm25_index_path
 
-__all__ = ["CollectionCorpusStore"]
+__all__ = ["RunCorpus", "RunCorpusLoader", "bm25_index_path"]
