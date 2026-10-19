@@ -19,6 +19,21 @@ class PaperRepository:
     def __init__(self, db_pool: Pool):
         self._pool = db_pool
 
+    async def list_runs(self, limit: int = 30) -> list[dict]:
+        """Return the most recently updated research runs with paper counts."""
+        query = """
+            SELECT r.run_id::text AS run_id, r.research_question, r.query_id::text AS query_id,
+                   r.created_at, COUNT(DISTINCT ps.paper_id)::int AS paper_count
+            FROM research_runs r
+            LEFT JOIN paper_sources ps ON ps.run_id = r.run_id
+            GROUP BY r.run_id
+            ORDER BY r.created_at DESC
+            LIMIT $1
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, limit)
+        return [dict(row) for row in rows]
+
     async def save_collection_result(
         self,
         result: CollectionResult,
@@ -142,6 +157,31 @@ class PaperRepository:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, run_id)
             return [dict(r) for r in rows]
+
+    async def list_run_papers(
+        self, run_id: str, limit: int = 50, offset: int = 0, search: str | None = None
+    ) -> tuple[list[dict], int]:
+        """Return paginated paper metadata and processing state for a run."""
+        condition = "AND ($4::text IS NULL OR p.title ILIKE '%' || $4 || '%' OR COALESCE(p.doi, '') ILIKE '%' || $4 || '%' OR COALESCE(p.abstract, '') ILIKE '%' || $4 || '%')"
+        async with self._pool.acquire() as conn:
+            count = await conn.fetchval(
+                """SELECT COUNT(DISTINCT p.paper_id) FROM papers p
+                   JOIN paper_sources ps ON ps.paper_id = p.paper_id
+                   WHERE ps.run_id = $1 """ + condition,
+                run_id, limit, offset, search or None,
+            )
+            rows = await conn.fetch(
+                """SELECT DISTINCT p.paper_id::text AS paper_id, p.title, p.abstract, p.doi,
+                          p.publication_year, p.authors, p.full_text_url, p.source_type,
+                          p.full_text_status, p.parsing_status, p.section_status,
+                          p.chunk_status, p.embedding_status
+                   FROM papers p
+                   JOIN paper_sources ps ON ps.paper_id = p.paper_id
+                   WHERE ps.run_id = $1 """ + condition +
+                " ORDER BY p.publication_year DESC NULLS LAST, p.title ASC LIMIT $2 OFFSET $3",
+                run_id, limit, offset, search or None,
+            )
+        return [dict(row) for row in rows], int(count or 0)
 
     async def run_exists(self, run_id: str) -> bool:
         """Returns True if a research_runs row exists for run_id."""

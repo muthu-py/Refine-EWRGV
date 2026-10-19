@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.core.exceptions import IngestionError
+from app.core.exceptions import IngestionError, RateLimitError
 from app.core.logging import get_logger
 from app.domain.models.collection import CollectedPaper, CollectionResult
 from app.domain.models.query import ResearchQuery
@@ -73,12 +73,14 @@ class LiteratureCollectionService:
         providers: dict[str, Any],
         max_results_per_query: int = 20,
         max_total_results: int = 200,
+        max_queries: int = 4,
     ) -> None:
         if not providers:
             raise ValueError("LiteratureCollectionService requires at least one provider.")
         self._providers = providers
         self._max_results_per_query = max_results_per_query
         self._max_total_results = max_total_results
+        self._max_queries = max(1, max_queries)
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -89,6 +91,7 @@ class LiteratureCollectionService:
         research_query: ResearchQuery,
         max_results_per_query: int | None = None,
         max_total_results: int | None = None,
+        max_queries: int | None = None,
     ) -> CollectionResult:
         """
         Run literature collection for the given ResearchQuery.
@@ -113,7 +116,17 @@ class LiteratureCollectionService:
             All collected papers + provenance + any provider errors.
             ``capped`` is True when the total cap stopped collection early.
         """
-        queries = research_query.expanded_queries or [research_query.query]
+        raw_queries = research_query.expanded_queries or [research_query.query]
+        queries: list[str] = []
+        seen_queries: set[str] = set()
+        for query in raw_queries:
+            normalized = " ".join((query or "").lower().split())
+            if normalized and normalized not in seen_queries:
+                seen_queries.add(normalized)
+                queries.append(query.strip())
+        query_limit = max_queries or self._max_queries
+        query_cap_reached = len(queries) > query_limit
+        queries = queries[:query_limit]
         per_query = max_results_per_query or self._max_results_per_query
         total_cap = max_total_results or self._max_total_results
 
@@ -132,11 +145,14 @@ class LiteratureCollectionService:
         provider_errors: list[dict] = []
         providers_used: list[str] = []
         total_cap_reached = False
+        rate_limited_providers: set[str] = set()
 
         for query in queries:
             if total_cap_reached:
                 break
             for provider_name, collector in self._providers.items():
+                if provider_name in rate_limited_providers:
+                    continue
                 remaining = total_cap - len(all_papers)
                 limit = min(per_query, remaining)
                 if limit <= 0:
@@ -174,6 +190,8 @@ class LiteratureCollectionService:
                         "query": query,
                         "error": str(exc),
                     })
+                    if isinstance(exc, RateLimitError):
+                        rate_limited_providers.add(provider_name)
                 except Exception as exc:  # noqa: BLE001
                     logger.error(
                         "LiteratureCollectionService: unexpected error",
@@ -204,7 +222,7 @@ class LiteratureCollectionService:
             papers=all_papers,
             provider_errors=provider_errors,
             status=status,
-            capped=total_cap_reached,
+            capped=total_cap_reached or query_cap_reached,
         )
 
         logger.info(
@@ -214,6 +232,8 @@ class LiteratureCollectionService:
                 "status": status,
                 "total": len(all_papers),
                 "errors": len(provider_errors),
+                "rate_limited_providers": sorted(rate_limited_providers),
+                "query_cap_reached": query_cap_reached,
             },
         )
         return result

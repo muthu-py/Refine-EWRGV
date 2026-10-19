@@ -1,34 +1,15 @@
 """
 app/validation/terminology_search.py
 --------------------------------------
-Terminology / synonym expansion search.
-
-Uses synonyms, acronyms, and alternative terms for the gap's key concepts
-to find evidence that would be missed by verbatim search.
-
-Status: SKELETON – not implemented.
+Terminology search: the gap's concepts replaced by knowledge-graph aliases
+and synonyms, so a gap is not declared just because the literature uses
+other words for it.
 """
 
 from __future__ import annotations
 
-from app.core.logging import get_logger
-from app.domain.models.candidate_gap import CandidateGap
-from app.domain.models.paper_chunk import PaperChunk
-
-logger = get_logger(__name__)
+from app.validation.direct_search import ValidationSearch
 
 
-class TerminologySearch:
-    """
-    Searches for evidence using terminology expansion.
-
-    Status: SKELETON – not implemented.
-    """
-
-    def __init__(self, retriever: object) -> None:
-        self._retriever = retriever
-
-    def search(self, gap: CandidateGap, queries: list[str]) -> list[PaperChunk]:
-        """Run terminology-expanded search. NOT YET IMPLEMENTED."""
-        logger.warning("TerminologySearch.search is not yet implemented.")
-        return []
+class TerminologySearch(ValidationSearch):
+    search_type = "terminology"

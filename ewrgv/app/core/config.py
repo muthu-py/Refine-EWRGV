@@ -124,6 +124,12 @@ class Settings(BaseSettings):
     # Overall collection limits
     LITERATURE_REQUEST_TIMEOUT: int = 30    # HTTP timeout in seconds
     LITERATURE_MAX_TOTAL_RESULTS: int = 200  # hard cap across all queries + providers
+    LITERATURE_MAX_QUERIES: int = 4         # original query plus at most three expansions
+    LITERATURE_MAX_RETRIES: int = 2
+    LITERATURE_RETRY_BASE_DELAY: float = 2.0
+    LITERATURE_MAX_RETRY_DELAY: float = 60.0
+    LITERATURE_MIN_REQUEST_INTERVAL: float = 1.0
+    LITERATURE_SEARCH_CACHE_TTL: int = 900
 
     # ------------------------------------------------------------------ #
     # Chunking (Phase 2.7)

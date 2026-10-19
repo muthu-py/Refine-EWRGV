@@ -32,7 +32,9 @@ Explicitly NOT used:
 - Microservices
 - Message brokers / event queues
 - Distributed processing
-- Knowledge graphs / GNN / GraphRAG
+- Graph databases (Neo4j), GNN training, GraphRAG infrastructure. A per-run knowledge graph *is* used
+  (in-process NetworkX, persisted as JSONB in Postgres): see
+  `docs/methodology/HYBRID_KG_GAP_METHODOLOGY.md` and `app/knowledge_graph/`
 - Fine-tuning
 
 ---

@@ -13,7 +13,6 @@ POST /api/v1/research/retrieve/dense      – Dense (semantic) retrieval
 POST /api/v1/research/retrieve/sparse     – Sparse (BM25) retrieval
 POST /api/v1/research/retrieve/hybrid     – Hybrid (RRF fusion) retrieval
 POST /api/v1/research/gaps               – Trigger gap detection for a query
-POST /api/v1/research/validate           – Trigger EWRGV validation for a gap
 GET  /api/v1/research/{job_id}           – Get status/results of a research job
 
 Design notes
@@ -31,6 +30,7 @@ NOT in these route handlers.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -122,6 +122,7 @@ class CollectRequest(BaseModel):
     include_original_query: bool = True     # also search the question itself
     max_results_per_query: Optional[int] = None   # default: SEMANTIC_SCHOLAR_MAX_RESULTS
     max_total_results: Optional[int] = None       # default: LITERATURE_MAX_TOTAL_RESULTS
+    max_queries: Optional[int] = None              # default: LITERATURE_MAX_QUERIES
 
 
 class CollectPaperResponse(BaseModel):
@@ -184,27 +185,6 @@ class ParseStatusResponse(BaseModel):
     stage: str
     status: str
     result_summary: Optional[dict] = None
-
-
-class GapsRequest(BaseModel):
-    job_id: str
-
-
-class GapsResponse(BaseModel):
-    job_id: str
-    status: str
-    candidate_gaps: list[dict]
-
-
-class ValidateRequest(BaseModel):
-    job_id: str
-    gap_ids: Optional[list[str]] = None   # None = validate all top-k
-
-
-class ValidateResponse(BaseModel):
-    job_id: str
-    status: str
-    validation_results: list[dict]
 
 
 class RetrieveFilterFields(BaseModel):
@@ -332,6 +312,7 @@ def _get_qu_service() -> Any:
     )
 
 
+@lru_cache(maxsize=1)
 def _get_collection_service() -> Any:
     """
     Lazily construct a LiteratureCollectionService from settings.
@@ -358,12 +339,22 @@ def _get_collection_service() -> Any:
                 api_key=settings.SEMANTIC_SCHOLAR_API_KEY,
                 base_url=settings.SEMANTIC_SCHOLAR_BASE_URL,
                 timeout=settings.LITERATURE_REQUEST_TIMEOUT,
+                max_retries=settings.LITERATURE_MAX_RETRIES,
+                retry_base_delay=settings.LITERATURE_RETRY_BASE_DELAY,
+                min_request_interval=settings.LITERATURE_MIN_REQUEST_INTERVAL,
+                max_retry_delay=settings.LITERATURE_MAX_RETRY_DELAY,
+                cache_ttl=settings.LITERATURE_SEARCH_CACHE_TTL,
             )
         elif name == "openalex":
             providers[name] = OpenAlexCollector(
                 base_url=settings.OPENALEX_BASE_URL,
                 mailto=settings.OPENALEX_EMAIL,
                 timeout=settings.LITERATURE_REQUEST_TIMEOUT,
+                max_retries=settings.LITERATURE_MAX_RETRIES,
+                retry_base_delay=settings.LITERATURE_RETRY_BASE_DELAY,
+                min_request_interval=settings.LITERATURE_MIN_REQUEST_INTERVAL,
+                max_retry_delay=settings.LITERATURE_MAX_RETRY_DELAY,
+                cache_ttl=settings.LITERATURE_SEARCH_CACHE_TTL,
             )
 
     if not providers:
@@ -373,6 +364,7 @@ def _get_collection_service() -> Any:
         providers=providers,
         max_results_per_query=settings.SEMANTIC_SCHOLAR_MAX_RESULTS,
         max_total_results=settings.LITERATURE_MAX_TOTAL_RESULTS,
+        max_queries=settings.LITERATURE_MAX_QUERIES,
     )
 
 
@@ -527,7 +519,8 @@ async def collect_literature(request: CollectRequest) -> CollectResponse:
     if not question:
         raise BadRequestError("Give a query_id from /query, or a query.")
     for name, value in (("max_results_per_query", request.max_results_per_query),
-                        ("max_total_results", request.max_total_results)):
+                        ("max_total_results", request.max_total_results),
+                        ("max_queries", request.max_queries)):
         if value is not None and value < 1:
             raise BadRequestError(f"{name} must be >= 1.")
 
@@ -549,6 +542,7 @@ async def collect_literature(request: CollectRequest) -> CollectResponse:
         rq,
         max_results_per_query=request.max_results_per_query,
         max_total_results=request.max_total_results,
+        max_queries=request.max_queries,
     )
 
     # Persist the run and its papers; without this the run_id is useless.
@@ -598,6 +592,39 @@ async def collect_literature(request: CollectRequest) -> CollectResponse:
         papers=papers_resp,
         provider_errors=result.provider_errors,
     )
+
+
+@router.get("/papers/{run_id}", summary="List papers collected for a run")
+async def list_run_papers(
+    run_id: str,
+    q: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """Return searchable, paginated paper metadata and pipeline states."""
+    from fastapi import HTTPException  # noqa: PLC0415
+    from app.storage.relational.database import get_db_pool  # noqa: PLC0415
+    from app.storage.repositories.paper_repository import PaperRepository  # noqa: PLC0415
+
+    if limit < 1 or limit > 100 or offset < 0:
+        raise HTTPException(status_code=400, detail="limit must be 1..100 and offset must be >= 0.")
+    papers, total = await PaperRepository(await get_db_pool()).list_run_papers(
+        run_id, limit=limit, offset=offset, search=q,
+    )
+    return {"run_id": run_id, "total": total, "limit": limit, "offset": offset, "papers": papers}
+
+
+@router.get("/runs", summary="List recent research runs")
+async def list_research_runs(limit: int = 30) -> dict:
+    """List recent run records for the workspace dashboard."""
+    from fastapi import HTTPException  # noqa: PLC0415
+    from app.storage.relational.database import get_db_pool  # noqa: PLC0415
+    from app.storage.repositories.paper_repository import PaperRepository  # noqa: PLC0415
+
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be 1..100.")
+    runs = await PaperRepository(await get_db_pool()).list_runs(limit=limit)
+    return {"runs": runs}
 
 
 @router.post("/acquire", response_model=AcquireResponse, summary="Start full-text acquisition")
@@ -852,38 +879,6 @@ async def retrieve_multi(request: MultiRetrieveRequest) -> RetrieveResponse:
             )
             for r in results
         ],
-    )
-
-
-@router.post("/gaps", response_model=GapsResponse, summary="Retrieve detected gaps")
-async def get_detected_gaps(request: GapsRequest) -> GapsResponse:
-    """
-    Retrieve candidate gaps detected for a submitted query job.
-
-    **NOT YET IMPLEMENTED** – returns an empty gap list.
-    """
-    return GapsResponse(
-        job_id=request.job_id,
-        status="not_implemented",
-        candidate_gaps=[],
-    )
-
-
-@router.post(
-    "/validate",
-    response_model=ValidateResponse,
-    summary="Trigger EWRGV validation",
-)
-async def trigger_validation(request: ValidateRequest) -> ValidateResponse:
-    """
-    Trigger EWRGV validation for the top-k candidate gaps of a job.
-
-    **NOT YET IMPLEMENTED** – returns an empty validation result list.
-    """
-    return ValidateResponse(
-        job_id=request.job_id,
-        status="not_implemented",
-        validation_results=[],
     )
 
 

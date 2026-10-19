@@ -92,6 +92,14 @@ class IngestionError(EWRGVError):
     """Raised when literature ingestion or document parsing fails."""
 
 
+class RateLimitError(IngestionError):
+    """A literature provider is rate limiting this client."""
+
+    def __init__(self, message: str, retry_after: Optional[float] = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class RetrievalError(EWRGVError):
     """Raised when the retrieval layer cannot complete a query."""
 

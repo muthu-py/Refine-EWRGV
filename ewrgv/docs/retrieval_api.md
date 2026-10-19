@@ -12,6 +12,17 @@ index `/represent` persisted at `BM25_INDEX_PATH/<run_id>/bm25_index.pkl`.
 | `/api/v1/research/retrieve/dense` | POST | Dense (semantic) retrieval over stored embeddings |
 | `/api/v1/research/retrieve/sparse` | POST | Sparse (BM25) lexical keyword matching |
 | `/api/v1/research/retrieve/hybrid` | POST | Dense + BM25 fused with Reciprocal Rank Fusion |
+| `/api/v1/research/retrieve/multi` | POST | Several queries (e.g. the question + all its expansions) fused with RRF |
+
+Applied to every endpoint:
+
+- **Noise excluded by default.** REFERENCES / ACKNOWLEDGMENTS chunks and chunks whose text is mostly citations
+  or publisher boilerplate (licence lines, journal headers) are never returned unless `include_noise: true`
+  (`app/retrieval/filters.py`; on run `e0b54bcc` this excludes 143 of 943 chunks).
+- **At most 3 hits per paper** (`RETRIEVAL_MAX_PER_PAPER`, 0 = off); if too few papers exist the best skipped
+  hits backfill the list.
+- **Corpus cache.** The run corpus is cached for `RETRIEVAL_CORPUS_CACHE_TTL` seconds (default 900) and cleared
+  when `/chunks` or `/represent` finishes; repeated calls take ~0.6 s instead of re-downloading everything.
 
 ---
 
@@ -22,6 +33,10 @@ index `/represent` persisted at `BM25_INDEX_PATH/<run_id>/bm25_index.pkl`.
 | `run_id` | string | **Yes**  | —       | An existing research run with chunked papers |
 | `query`  | string | **Yes**  | —       | Non-empty   |
 | `top_k`  | int    | No       | `10`    | 1–100       |
+| `section_types` | list[string] | No | `[]` (all) | e.g. `["LIMITATIONS"]`; preset `"gap_evidence"` = LIMITATIONS, FUTURE_WORK, DISCUSSION, CONCLUSION, RESULTS |
+| `paper_ids` | list[string] | No | `[]` (all) | Restrict to these papers |
+| `year_from`, `year_to` | int | No | — | Inclusive publication-year bounds (results without a year are dropped when set) |
+| `include_noise` | bool | No | `false` | Also search references / acknowledgments / boilerplate |
 
 ```json
 {
@@ -80,10 +95,35 @@ index `/represent` persisted at `BM25_INDEX_PATH/<run_id>/bm25_index.pkl`.
 
 | Status | Condition |
 |--------|-----------|
-| 400    | Blank `run_id` or query, invalid `top_k` (≤0 or >100), `/dense` without `EMBEDDING_API_KEY` |
+| 400    | Blank `run_id` or query, invalid `top_k` (≤0 or >100), `year_from > year_to`, `/dense` without a configured embedding provider |
 | 404    | `run_id` not found |
 | 409    | The run has no chunked papers yet (run `/chunks`, and `/represent` for dense) |
 | 422    | Missing `run_id` or `query` |
+| 429    | Embedding API rate limit (API providers only); `Retry-After` header set |
+| 502    | Embedding API rejected the key or the request (API providers only) |
+
+---
+
+## Multi-query retrieval: `POST /retrieve/multi`
+
+| Field | Default | Meaning |
+|---|---|---|
+| `run_id` | — | Required |
+| `query_id` | — | Stored `/query` result: uses the question + all expanded queries |
+| `queries` | `[]` | Explicit queries (used instead of / without `query_id`) |
+| `method` | `hybrid` | `dense`, `sparse` or `hybrid` per query |
+| `top_k` | `10` | 1–100 |
+| filters | — | Same `section_types`, `paper_ids`, `year_from`, `year_to`, `include_noise` |
+
+Each query is ranked over the whole (filtered) corpus, the ranked lists are fused with RRF (k = 60), then the
+per-paper cap applies. Results carry `retrieval_method: "multi_<method>"` and
+`metadata.matched_queries` / `metadata.query_ranks`. `query` in the response is the queries joined by ` | `.
+
+```json
+{"run_id": "e0b54bcc-...", "query_id": "57393ebc-...", "method": "hybrid", "top_k": 10, "section_types": ["gap_evidence"]}
+```
+
+Errors: 400 no queries / bad method / bad `top_k`; 404 unknown `query_id` or run.
 
 ---
 

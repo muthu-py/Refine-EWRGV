@@ -1,5 +1,5 @@
 """
-Apply the pending schema migrations (04, 05, 07, 08, 09) to the Supabase database
+Apply the pending schema migrations (04, 05, 07, 08, 09, 10, 11) to the Supabase database
 in SUPABASE_DATABASE_URL.  Every statement uses IF NOT EXISTS, so re-running
 is safe.  06 is skipped: it uses ADD CONSTRAINT IF NOT EXISTS, which
 PostgreSQL does not support.
@@ -23,6 +23,8 @@ MIGRATIONS = [
     "07_add_embedding_table.sql",
     "08_embeddings_384.sql",
     "09_query_runs.sql",
+    "10_kg_and_gaps.sql",
+    "11_gap_validation.sql",
 ]
 
 
