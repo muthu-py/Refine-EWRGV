@@ -22,7 +22,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from app.core.exceptions import BadRequestError, RetrievalError
+from app.core.config import settings
+from app.core.exceptions import BadRequestError, EmbeddingAPIError, RetrievalError
 from app.core.logging import get_logger
 from app.domain.interfaces import CorpusStore, EmbeddingProvider
 from app.domain.models.retrieval_result import RetrievalResult
@@ -109,11 +110,18 @@ class RetrievalService:
             texts = [query] + [
                 c.text
                 for c in self._corpus.get_all_chunks()
-                if not callable(stored) or stored(c.chunk_id) is None
+                if c.text and c.text.strip()
+                and (not callable(stored) or stored(c.chunk_id) is None)
             ]
             texts = list(dict.fromkeys(texts))
+            # Embed in batches: some providers cap inputs per request (Gemini: 100).
+            batch_size = max(1, settings.EMBEDDING_BATCH_SIZE)
             try:
-                vectors = await self._embedder.embed_documents(texts)
+                vectors = []
+                for i in range(0, len(texts), batch_size):
+                    vectors.extend(await self._embedder.embed_documents(texts[i:i + batch_size]))
+            except EmbeddingAPIError:
+                raise  # carries its own HTTP mapping (see app.main)
             except Exception as exc:
                 raise RetrievalError(f"Query embedding failed: {exc}") from exc
             self._use_embedder(_PrecomputedEmbeddings(self._embedder, dict(zip(texts, vectors))))

@@ -14,6 +14,14 @@ from app.providers.embeddings.openai_embeddings import OpenAIEmbeddingProvider
 
 logger = get_logger(__name__)
 
+# OpenAI-compatible embedding endpoints, keyed by EMBEDDING_PROVIDER.
+_DEFAULT_BASE_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "google": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "openrouter": "https://openrouter.ai/api/v1",
+}
+
 
 def create_embedding_provider(
     provider_name: str | None = None,
@@ -29,7 +37,7 @@ def create_embedding_provider(
 
     If parameters are omitted, values from application Settings (.env) are used.
 
-    Currently supports: 'openai'.
+    Supports OpenAI-compatible endpoints: 'openai', 'google'/'gemini', 'openrouter'.
 
     Returns
     -------
@@ -50,9 +58,11 @@ def create_embedding_provider(
     retries = max_retries if max_retries is not None else settings.EMBEDDING_RETRY_COUNT
     delay = retry_delay if retry_delay is not None else settings.EMBEDDING_RETRY_DELAY
 
-    if name == "openai":
+    if name in _DEFAULT_BASE_URLS:
+        base_url = settings.EMBEDDING_BASE_URL or _DEFAULT_BASE_URLS[name]
         logger.info(
-            "Creating OpenAI embedding provider (model=%s, dim=%d)",
+            "Creating %s embedding provider (model=%s, dim=%d)",
+            name,
             mdl,
             dim,
         )
@@ -63,9 +73,10 @@ def create_embedding_provider(
             timeout=tout,
             max_retries=retries,
             retry_delay=delay,
+            base_url=base_url,
         )
 
     raise ValueError(
         f"Unsupported embedding provider: '{name}'. "
-        "Supported providers: 'openai'."
+        f"Supported providers: {', '.join(sorted(_DEFAULT_BASE_URLS))}."
     )

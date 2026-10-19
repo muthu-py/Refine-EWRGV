@@ -25,21 +25,23 @@ Security
 from __future__ import annotations
 
 import asyncio
+import random
+import re
 from typing import Optional
 
 import httpx
 
 from app.core.config import settings
-from app.core.exceptions import ProviderError
+from app.core.exceptions import EmbeddingAPIError, ProviderError
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
 # HTTP status codes that should trigger a retry
-_RETRYABLE_STATUS_CODES = {429, 500, 502, 503}
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
-# OpenAI Embeddings API endpoint
-_OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
+# Default OpenAI-compatible base URL (override with base_url / EMBEDDING_BASE_URL)
+_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
 class OpenAIEmbeddingProvider:
@@ -72,13 +74,16 @@ class OpenAIEmbeddingProvider:
         timeout: int | None = None,
         max_retries: int | None = None,
         retry_delay: float | None = None,
+        base_url: str | None = None,
     ) -> None:
+        self._embeddings_url = (base_url or settings.EMBEDDING_BASE_URL or _OPENAI_BASE_URL).rstrip("/") + "/embeddings"
         self._api_key = api_key or settings.EMBEDDING_API_KEY
         self._model = model or settings.EMBEDDING_MODEL
         self._dimension = dimension or settings.EMBEDDING_DIMENSION
         self._timeout = timeout or settings.EMBEDDING_TIMEOUT
         self._max_retries = max_retries if max_retries is not None else settings.EMBEDDING_RETRY_COUNT
         self._retry_delay = retry_delay if retry_delay is not None else settings.EMBEDDING_RETRY_DELAY
+        self._max_backoff = settings.EMBEDDING_MAX_BACKOFF
         self._client: Optional[httpx.AsyncClient] = None
 
         if not self._api_key:
@@ -148,6 +153,7 @@ class OpenAIEmbeddingProvider:
         payload = {
             "input": texts,
             "model": self._model,
+            "dimensions": self._dimension,
         }
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -158,7 +164,7 @@ class OpenAIEmbeddingProvider:
         for attempt in range(self._max_retries + 1):
             try:
                 response = await client.post(
-                    _OPENAI_EMBEDDINGS_URL,
+                    self._embeddings_url,
                     json=payload,
                     headers=headers,
                     timeout=self._timeout,
@@ -167,28 +173,27 @@ class OpenAIEmbeddingProvider:
                 if response.status_code == 200:
                     return self._parse_response(response.json(), len(texts))
 
-                if response.status_code in _RETRYABLE_STATUS_CODES:
-                    retry_after = self._get_retry_after(response, attempt)
+                provider_message = _error_message(response)
+                retry_after = self._get_retry_after(response, attempt)
+                last_error = EmbeddingAPIError(
+                    response.status_code, provider_message, retry_after=retry_after
+                )
+
+                if response.status_code in _RETRYABLE_STATUS_CODES and attempt < self._max_retries:
                     logger.warning(
                         "Embedding API returned %d (attempt %d/%d), "
-                        "retrying in %.1fs",
+                        "retrying in %.1fs: %s",
                         response.status_code,
                         attempt + 1,
                         self._max_retries + 1,
                         retry_after,
+                        provider_message,
                     )
                     await asyncio.sleep(retry_after)
-                    last_error = ProviderError(
-                        f"Embedding API error: HTTP {response.status_code}",
-                        detail=response.text[:500] if response.text else None,
-                    )
                     continue
 
-                # Non-retryable error
-                raise ProviderError(
-                    f"Embedding API error: HTTP {response.status_code}",
-                    detail=response.text[:500] if response.text else None,
-                )
+                # Non-retryable error, or retries exhausted
+                raise last_error
 
             except httpx.RequestError as exc:
                 logger.warning(
@@ -306,12 +311,53 @@ class OpenAIEmbeddingProvider:
         """
         Determine how long to wait before retrying.
 
-        Uses Retry-After header if present, otherwise exponential backoff.
+        Uses the Retry-After header, else Gemini's RetryInfo ``retryDelay``
+        in the JSON body, else exponential backoff with jitter.  Always
+        capped at EMBEDDING_MAX_BACKOFF.
         """
-        retry_after = response.headers.get("Retry-After")
-        if retry_after:
-            try:
-                return float(retry_after)
-            except (ValueError, TypeError):
-                pass
-        return self._retry_delay * (2 ** attempt)
+        hinted = _retry_hint(response)
+        if hinted is not None:
+            return min(hinted, self._max_backoff)
+        backoff = self._retry_delay * (2 ** attempt)
+        return min(backoff + random.uniform(0, backoff / 2), self._max_backoff)
+
+
+# ------------------------------------------------------------------ #
+# Error-response helpers
+# ------------------------------------------------------------------ #
+
+
+def _error_body(response: httpx.Response) -> dict:
+    """The JSON error object, unwrapping Gemini's list-wrapped form."""
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    if isinstance(body, list) and body:
+        body = body[0]
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        return body["error"]
+    return body if isinstance(body, dict) else {}
+
+
+def _error_message(response: httpx.Response) -> str:
+    """Short provider message from an error response (first line, <= 300 chars)."""
+    message = _error_body(response).get("message") or response.text or ""
+    message = str(message).strip().lstrip("* ").splitlines()[0] if str(message).strip() else ""
+    return message[:300]
+
+
+def _retry_hint(response: httpx.Response) -> float | None:
+    """Seconds to wait as suggested by Retry-After or Gemini's RetryInfo."""
+    header = response.headers.get("Retry-After")
+    if header:
+        try:
+            return max(0.0, float(header))
+        except (ValueError, TypeError):
+            pass
+    for detail in _error_body(response).get("details") or []:
+        if isinstance(detail, dict) and "retryDelay" in detail:
+            match = re.match(r"^\s*([\d.]+)s\s*$", str(detail["retryDelay"]))
+            if match:
+                return float(match.group(1))
+    return None

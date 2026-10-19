@@ -70,11 +70,13 @@ class Settings(BaseSettings):
     EMBEDDING_PROVIDER: str = "openai"    # e.g. "openai", "sentence-transformers"
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_API_KEY: str = Field(default="", repr=False)
+    EMBEDDING_BASE_URL: str | None = None  # OpenAI-compatible endpoint; defaults per provider (see embeddings factory)
     EMBEDDING_DIMENSION: int = 1536
     EMBEDDING_BATCH_SIZE: int = 32        # chunks per API request
     EMBEDDING_TIMEOUT: int = 60           # HTTP request timeout in seconds
-    EMBEDDING_RETRY_COUNT: int = 3        # max retries on transient failures
+    EMBEDDING_RETRY_COUNT: int = 5        # max retries on transient failures (429 / 5xx / network)
     EMBEDDING_RETRY_DELAY: float = 1.0    # base delay in seconds between retries
+    EMBEDDING_MAX_BACKOFF: float = 60.0   # cap (seconds) on any single retry wait, incl. Retry-After
 
     # ------------------------------------------------------------------ #
     # BM25 (Phase 2.9)

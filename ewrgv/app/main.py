@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import health, research
 from app.core.config import settings
-from app.core.exceptions import APIError, EWRGVError
+from app.core.exceptions import APIError, EmbeddingAPIError, EWRGVError
 from app.core.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
@@ -97,6 +97,24 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": exc.message, "detail": exc.detail},
+        )
+
+    @app.exception_handler(EmbeddingAPIError)
+    async def embedding_api_error_handler(request: Request, exc: EmbeddingAPIError) -> JSONResponse:
+        # Upstream rate limit -> 429 so clients can back off; anything else the
+        # provider rejected (bad key, bad request, outage) -> 502 Bad Gateway.
+        logger.warning("EmbeddingAPIError (%s): %s", exc.kind, exc.message)
+        headers = {}
+        if exc.kind == "rate_limit":
+            status = 429
+            if exc.retry_after:
+                headers["Retry-After"] = str(int(exc.retry_after + 0.999))
+        else:
+            status = 502
+        return JSONResponse(
+            status_code=status,
+            content={"error": exc.message, "detail": exc.provider_message or None},
+            headers=headers,
         )
 
     @app.exception_handler(EWRGVError)

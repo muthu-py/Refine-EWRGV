@@ -48,6 +48,46 @@ class ProviderError(EWRGVError):
     """Raised when an external provider (LLM, embedding, search) fails."""
 
 
+class EmbeddingAPIError(ProviderError):
+    """
+    The embedding API answered with an HTTP error.
+
+    ``kind`` is one of "auth" (401/403), "rate_limit" (429), "bad_request"
+    (400/404/422) or "upstream" (5xx / anything else).  ``provider_message``
+    is the short message parsed from the response body (never the API key);
+    ``retry_after`` is the suggested wait in seconds for rate limits.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        provider_message: str = "",
+        retry_after: Optional[float] = None,
+    ) -> None:
+        self.status_code = status_code
+        self.provider_message = provider_message
+        self.retry_after = retry_after
+        if status_code in (401, 403):
+            self.kind = "auth"
+            message = (
+                f"Embedding API rejected the key (HTTP {status_code}) - "
+                "check EMBEDDING_API_KEY / EMBEDDING_BASE_URL / EMBEDDING_PROVIDER"
+            )
+        elif status_code == 429:
+            self.kind = "rate_limit"
+            wait = f" - retry in {int(retry_after + 0.999)}s" if retry_after else " - retry shortly"
+            message = f"Embedding rate limit reached (HTTP 429){wait}"
+        elif status_code in (400, 404, 422):
+            self.kind = "bad_request"
+            message = f"Embedding API rejected the request (HTTP {status_code})"
+        else:
+            self.kind = "upstream"
+            message = f"Embedding API error: HTTP {status_code}"
+        if provider_message:
+            message = f"{message}: {provider_message}"
+        super().__init__(message, detail=provider_message or None)
+
+
 class IngestionError(EWRGVError):
     """Raised when literature ingestion or document parsing fails."""
 
