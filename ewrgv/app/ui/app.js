@@ -1,7 +1,13 @@
 const API = "/api/v1/research";
 const KEYS = { run: "refine.activeRun", query: "refine.activeQuery", job: "refine.pipelineJob", question: "refine.question" };
 const stages = ["acquire", "parse", "sections", "chunks", "represent", "kg", "gaps", "validate"];
+const pipelineSequence = ["query", "collect", ...stages];
+const pipelinePrerequisites = {
+  parse: ["acquire"], sections: ["parse"], chunks: ["sections"], represent: ["chunks"],
+  kg: ["chunks", "represent"], gaps: ["kg"], validate: ["gaps"],
+};
 const stageNames = { acquire: "Acquire full text", parse: "Parse documents", sections: "Extract sections", chunks: "Build chunks", represent: "Create embeddings", kg: "Build knowledge graph", gaps: "Identify candidate gaps", validate: "Validate gaps" };
+const sequenceNames = { query: "Understand research question", collect: "Collect literature", ...stageNames };
 const nav = [
   ["workspace", "⌂", "Workspace"], ["new", "+", "Full investigation"], ["pipeline", "↗", "Run pipeline"],
   ["literature", "▤", "Literature"], ["gaps", "◈", "Candidate gaps"], ["validation", "✓", "Validation"],
@@ -12,6 +18,10 @@ const state = {
   question: localStorage.getItem(KEYS.question) || "", route: location.hash.slice(1) || "workspace",
   health: null, runs: [], runsLoaded: false, loadingRuns: false, papers: [], papersLoaded: false, paperOffset: 0, paperSort: "downloaded", gaps: null, validation: null, loadingValidation: false, graph: null, loadingGraph: false, busy: false,
   pipeline: JSON.parse(localStorage.getItem("refine.pipeline") || "{}"), queryResult: null,
+  gapOptions: JSON.parse(localStorage.getItem("refine.gapOptions") || "{\"llmWording\":false,\"llmCandidates\":false}"),
+  selectedGapIds: new Set(),
+  latestApiResponse: null,
+  responseDisclosureState: new Map(),
   fullWorkflow: JSON.parse(localStorage.getItem("refine.fullWorkflow") || "null"),
 };
 const app = document.querySelector("#app");
@@ -19,6 +29,7 @@ const app = document.querySelector("#app");
 function esc(value) { return String(value ?? "").replace(/[&<>\"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[c]); }
 function setStored(key, value) { if (value) localStorage.setItem(key, value); else localStorage.removeItem(key); }
 function activeRun(id, question = state.question, queryId = state.queryId) {
+  if ((id || "") !== state.runId) state.selectedGapIds.clear();
   state.runId = id || ""; state.question = question || ""; state.queryId = queryId || "";
   setStored(KEYS.run, state.runId); setStored(KEYS.question, state.question); setStored(KEYS.query, state.queryId);
 }
@@ -27,9 +38,17 @@ function toast(message, kind = "info") {
   const item = document.createElement("div"); item.className = `toast ${kind}`; item.textContent = message; host.append(item); setTimeout(() => item.remove(), 5200);
 }
 async function api(path, options = {}) {
-  const response = await fetch(`${API}${path}`, { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } });
+  const method = String(options.method || "GET").toUpperCase();
+  let response;
+  try {
+    response = await fetch(`${API}${path}`, { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } });
+  } catch (error) {
+    updateLatestApiResponse({ method, path, status: null, ok: false, body: { error: error.message } });
+    throw error;
+  }
   const raw = await response.text(); let data;
   try { data = raw ? JSON.parse(raw) : {}; } catch { data = { detail: raw }; }
+  updateLatestApiResponse({ method, path, status: response.status, ok: response.ok, body: data });
   if (!response.ok) throw new Error(data.detail || data.error || data.message || `Request failed (${response.status})`);
   return data;
 }
@@ -37,8 +56,25 @@ const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(bo
 function card(title, body, extra = "") { return `<section class="card ${extra}"><div class="card-body">${title}${body}</div></section>`; }
 function stat(value, label, note = "") { return `<div class="stat"><strong>${esc(value)}</strong><span>${esc(label)}</span>${note ? `<small>${esc(note)}</small>` : ""}</div>`; }
 function badge(value) { const style = String(value || "unknown").toLowerCase().replace(/[^a-z0-9_-]/g, "-"); return `<span class="badge ${style}">${esc(value || "Unknown")}</span>`; }
+function formatJson(value) { try { return esc(JSON.stringify(value ?? {}, null, 2)); } catch { return esc(String(value)); } }
+function responseDetails(label, value, defaultOpen = false, key = label) {
+  if (value == null) return "";
+  const open = state.responseDisclosureState.has(key) ? state.responseDisclosureState.get(key) : defaultOpen;
+  return `<details class="response-details" data-response-key="${esc(key)}" ${open ? "open" : ""}><summary>${esc(label)}</summary><pre><code>${formatJson(value)}</code></pre></details>`;
+}
+function latestApiResponseHtml() {
+  const response = state.latestApiResponse;
+  if (!response) return `<div class="latest-api-response empty-response"><b>API responses</b><small>Responses from recent requests will appear here as formatted JSON.</small></div>`;
+  const status = response.status == null ? "Network error" : `HTTP ${response.status}`;
+  return `<details class="latest-api-response" id="latest-api-response"><summary><span><b>Latest API response</b><small>${esc(response.method)} ${esc(response.path)} · ${status}</small></span><span class="response-toggle">View JSON⌄</span></summary><pre><code>${formatJson(response.body)}</code></pre></details>`;
+}
+function updateLatestApiResponse(response) {
+  state.latestApiResponse = { ...response, receivedAt: new Date().toISOString() };
+  const slot = document.querySelector("#latest-api-response-slot");
+  if (slot) slot.innerHTML = latestApiResponseHtml();
+}
 function shell(content) {
-  app.innerHTML = `<div class="layout"><aside class="sidebar"><a class="brand" href="#workspace"><span class="brand-mark">r</span><span>refine<small>RESEARCH WORKSPACE</small></span></a><div class="side-label">WORKSPACE</div><div class="nav-list">${nav.map(([id, icon, label]) => `<a class="nav-link ${state.route === id ? "active" : ""}" href="#${id}"><span class="nav-icon">${icon}</span>${label}</a>`).join("")}</div><div class="sidebar-spacer"></div><div class="side-run"><div class="side-label">ACTIVE RUN</div>${state.runId ? `<b>${esc(state.runId.slice(0, 8))}…</b><small>${esc(state.question || "Research run")}</small>` : `<small>No run selected</small>`}<a href="#pipeline">Open pipeline →</a></div><div class="sidebar-foot"><span class="health-dot ${state.health?.status === "ok" ? "online" : "offline"}"></span>${state.health?.status === "ok" ? "API connected" : "API unavailable"}<a href="/docs" target="_blank" rel="noreferrer">API docs ↗</a></div></aside><main class="main"><header class="topbar"><div><span class="eyebrow">EVIDENCE-WEIGHTED RESEARCH</span><span class="top-title">${state.runId ? `Run <code>${esc(state.runId)}</code>` : "Workspace"}</span></div><div class="top-actions"><button class="button subtle small" data-action="refresh">↻ Refresh</button><a class="button dark small" href="#new">＋ New investigation</a></div></header><div class="page">${content}</div></main></div><div id="toast-host" class="toast-host"></div>`;
+  app.innerHTML = `<div class="layout"><aside class="sidebar"><a class="brand" href="#workspace"><span class="brand-mark">r</span><span>refine<small>RESEARCH WORKSPACE</small></span></a><div class="side-label">WORKSPACE</div><div class="nav-list">${nav.map(([id, icon, label]) => `<a class="nav-link ${state.route === id ? "active" : ""}" href="#${id}"><span class="nav-icon">${icon}</span>${label}</a>`).join("")}</div><div class="sidebar-spacer"></div><div class="side-run"><div class="side-label">ACTIVE RUN</div>${state.runId ? `<b>${esc(state.runId.slice(0, 8))}…</b><small>${esc(state.question || "Research run")}</small>` : `<small>No run selected</small>`}<a href="#pipeline">Open pipeline →</a></div><div class="sidebar-foot"><span class="health-dot ${state.health?.status === "ok" ? "online" : "offline"}"></span>${state.health?.status === "ok" ? "API connected" : "API unavailable"}<a href="/docs" target="_blank" rel="noreferrer">API docs ↗</a></div></aside><main class="main"><header class="topbar"><div><span class="eyebrow">EVIDENCE-WEIGHTED RESEARCH</span><span class="top-title">${state.runId ? `Run <code>${esc(state.runId)}</code>` : "Workspace"}</span></div><div class="top-actions"><button class="button subtle small" data-action="refresh">↻ Refresh</button><a class="button dark small" href="#new">＋ New investigation</a></div></header><div class="page">${content}<div id="latest-api-response-slot">${latestApiResponseHtml()}</div></div></main></div><div id="toast-host" class="toast-host"></div>`;
  }
 function heading(kicker, title, desc, action = "") { return `<div class="page-heading"><div><div class="eyebrow">${esc(kicker)}</div><h1>${title}</h1><p>${desc}</p></div>${action}</div>`; }
 function empty(title, detail, action = "") { return `<div class="empty"><div class="empty-icon">✳</div><h3>${title}</h3><p>${detail}</p>${action}</div>`; }
@@ -50,9 +86,7 @@ function workspace() {
 function newInvestigation() {
   const workflow = state.fullWorkflow;
   const phases = [
-    ["query", "Understand and expand the question"],
-    ["collect", "Collect literature"],
-    ...stages.map(stage => [stage, stageNames[stage]]),
+    ...pipelineSequence.map(stage => [stage, sequenceNames[stage]]),
   ];
   const done = phases.filter(([key]) => workflow?.phases?.[key] === "COMPLETED").length;
   const progress = Math.round(done / phases.length * 100);
@@ -104,11 +138,36 @@ function newInvestigation() {
   `;
 }
 function pipeline() {
-  const completed = stages.filter(s => state.pipeline[s]?.status === "COMPLETED").length;
-  const percent = Math.round(completed / stages.length * 100);
-  return `${heading("RUN PIPELINE", "Move the evidence forward.", "Each stage is an API job with its own progress and result. Start all remaining stages or run them one at a time.", state.runId ? `<button class="button green" data-action="run-pipeline" ${state.busy ? "disabled" : ""}>${state.busy ? "Pipeline running…" : "▶ Run remaining stages"}</button>` : "")}${requireRun()}${state.runId ? `<div class="pipeline-summary"><div><span class="eyebrow">STAGE PROGRESS</span><h3>${completed} of ${stages.length} complete</h3></div><div class="progress-wrap"><div class="progress"><i style="width:${percent}%"></i></div><small>${percent}%</small></div></div><div class="stage-list">${stages.map((s, i) => { const result = state.pipeline[s] || {}; const status = result.status || "NOT_STARTED"; return `<article class="stage-card ${status.toLowerCase()}"><span class="stage-number">${String(i + 1).padStart(2, "0")}</span><div class="stage-copy"><b>${stageNames[s]}</b><small>${esc(result.message || stageHint(s))}</small>${result.job_id ? `<small class="job-id">Job ${esc(result.job_id)}</small>` : ""}</div>${badge(status.replaceAll("_", " "))}<button class="button outline small" data-action="run-stage" data-stage="${s}" ${state.busy ? "disabled" : ""}>${status === "COMPLETED" ? "Run again" : "Run"}</button></article>`; }).join("")}</div><div class="pipeline-log" id="pipeline-log">${state.busy ? `<span class="pulse"></span> ${esc(state.pipeline.currentMessage || "Working…")}` : ""}</div>` : ""}`;
+  const completed = 2 + stages.filter(s => state.pipeline[s]?.status === "COMPLETED").length;
+  const percent = Math.round(completed / pipelineSequence.length * 100);
+  const gapOptionsPanel = `<section class="card gap-options"><div class="card-body"><div class="gap-options-heading"><b>LLM assistance for gap detection</b><small>Both options are off by default. LLM results remain candidate hypotheses and still need EWRGV validation.</small></div><label><input id="llm-wording" type="checkbox" ${state.gapOptions.llmWording ? "checked" : ""}> Refine signal-based gap wording</label><small>Rephrase existing signal candidates using their cited passages; keep the original wording and scores.</small><label><input id="llm-candidates" type="checkbox" ${state.gapOptions.llmCandidates ? "checked" : ""}> Add LLM-proposed candidates</label><small>Generate additional proposals from reranked corpus passages and include their cited evidence in Candidate Gaps.</small><p>Requires a configured LLM API key. Candidates without valid corpus citations are discarded.</p></div></section>`;
+  return `${heading("RUN PIPELINE", "Move the evidence forward.", "Follow the complete sequence from query understanding and literature collection through processing, candidate identification, and validation. Stages are gated by their prerequisites.", state.runId ? `<button class="button green" data-action="run-pipeline" ${state.busy ? "disabled" : ""}>${state.busy ? "Pipeline running…" : "▶ Run remaining stages"}</button>` : "")}${requireRun()}${state.runId ? `<div class="pipeline-summary"><div><span class="eyebrow">PIPELINE PROGRESS</span><h3>${completed} of ${pipelineSequence.length} complete</h3></div><div class="progress-wrap"><div class="progress"><i style="width:${percent}%"></i></div><small>${percent}%</small></div></div>${gapOptionsPanel}<div class="stage-list">${pipelineSequence.map((step, i) => {
+    if (step === "query" || step === "collect") {
+      const details = step === "query"
+        ? (state.question ? `Question: ${state.question}` : "Research question is attached to this run.")
+        : `Run ${state.runId.slice(0, 8)}… exists; its collected literature is the input to acquisition.`;
+      return `<article class="stage-card completed pipeline-context-step"><span class="stage-number">${String(i + 1).padStart(2, "0")}</span><div class="stage-copy"><b>${sequenceNames[step]}</b><small>${esc(details)}</small></div>${badge("COMPLETED")}</article>`;
+    }
+    const s = step;
+    const result = state.pipeline[s] || {};
+    const status = result.status || "NOT_STARTED";
+    const prerequisites = pipelinePrerequisites[s] || [];
+    const missing = prerequisites.filter(required => state.pipeline[required]?.status !== "COMPLETED");
+    const gateHint = missing.length ? `Complete first: ${missing.map(required => sequenceNames[required]).join(", ")}.` : stageHint(s);
+    const disabled = state.busy || missing.length > 0;
+    return `<article class="stage-card ${status.toLowerCase()} ${missing.length ? "stage-blocked" : ""}"><span class="stage-number">${String(i + 1).padStart(2, "0")}</span><div class="stage-copy"><b>${stageNames[s]}</b><small>${esc(result.message || gateHint)}</small>${result.job_id ? `<small class="job-id">Job ${esc(result.job_id)}</small>` : ""}</div>${badge(status.replaceAll("_", " "))}<div class="stage-actions">${result.job_id ? `<button class="button subtle small" data-action="check-job-status" data-stage="${s}" ${state.busy ? "disabled" : ""}>Check status</button>` : ""}<button class="button outline small" data-action="run-stage" data-stage="${s}" ${disabled ? "disabled" : ""}>${status === "COMPLETED" ? "Run again" : "Run"}</button></div>${responseDetails("Job start response (POST)", result.startResponse, false, `${s}:start`)}${responseDetails("Latest job status response (GET)", result.statusResponse, result.showStatusResponse, `${s}:status`)}${responseDetails("Job result response (GET)", result.resultResponse, false, `${s}:result`)}</article>`;
+  }).join("")}</div><div class="pipeline-log" id="pipeline-log">${state.busy ? `<span class="pulse"></span> ${esc(state.pipeline.currentMessage || "Working…")}` : ""}</div>` : ""}`;
 }
-function stageHint(s) { return ({ acquire: "Download available full text for papers in this run.", parse: "Extract text from acquired PDFs.", sections: "Classify document sections such as methods and results.", chunks: "Create retrieval-sized text chunks.", represent: "Create vector representations for semantic search.", kg: "Extract entities and relationships into the knowledge graph.", gaps: "Generate candidate gaps from the run evidence.", validate: "Check candidate gaps against literature sources." })[s]; }
+function stageHint(s) { return ({ acquire: "Download available full text for papers in this run.", parse: "Extract text from acquired PDFs.", sections: "Classify document sections such as methods and results.", chunks: "Create retrieval-sized text chunks.", represent: "Create vector representations for semantic search.", kg: "Extract entities and relationships into the knowledge graph.", gaps: "Identify gaps with signal detectors and reranked evidence; optionally add LLM-proposed candidates or refine signal-based wording.", validate: "Check candidate gaps against literature sources." })[s]; }
+function invalidateDownstreamStages(stage) {
+  const stageIndex = stages.indexOf(stage);
+  for (const downstream of stages.slice(stageIndex + 1)) {
+    if (state.pipeline[downstream]?.status === "COMPLETED" || state.pipeline[downstream]?.job_id) {
+      state.pipeline[downstream] = { status: "NOT_STARTED", message: `Run again after ${stageNames[stage]} was rerun.` };
+    }
+  }
+  savePipeline();
+}
 function papersPage() {
   const body = state.papers.length ? `<div class="table-scroll"><table><thead><tr><th>PAPER</th><th>YEAR</th><th>FULL TEXT</th><th>PARSED</th><th>CHUNKS</th></tr></thead><tbody>${state.papers.map(p => `<tr><td><b>${esc(p.title || "Untitled paper")}</b><small>${esc(p.doi || p.paper_id || "")}</small></td><td>${esc(p.publication_year || "—")}</td><td>${badge(p.full_text_status)}</td><td>${badge(p.parsing_status)}</td><td>${badge(p.chunk_status)}</td></tr>`).join("")}</tbody></table></div><div class="pager"><span>Showing ${state.paperOffset + 1}–${state.paperOffset + state.papers.length} of ${state.paperTotal || state.papers.length} papers</span><div class="pager-actions"><button class="button outline small" data-action="papers-prev" ${state.paperOffset <= 0 ? "disabled" : ""}>← Previous</button><button class="button outline small" data-action="papers-next" ${state.paperOffset + state.papers.length >= state.paperTotal ? "disabled" : ""}>Next →</button><button class="button outline small" data-action="export-bib">Export BibTeX</button></div></div>` : empty("No papers loaded", "Choose a run to browse its collected papers.");
   return `${heading("LITERATURE EXPLORER", "Collected literature.", "Search papers and review processing status.", `<button class="button outline" data-action="export-bib" ${state.papers.length ? "" : "disabled"}>Export BibTeX</button>`)}${requireRun()}${state.runId ? `<div class="toolbar"><label class="sr-only" for="paper-search">Search papers</label><input id="paper-search" aria-label="Search papers" value="${esc(state.paperSearch || "")}"><button class="button outline" data-action="search-papers">Search</button><label for="paper-sort">Sort</label><select id="paper-sort"><option value="downloaded" ${state.paperSort === "downloaded" ? "selected" : ""}>Downloaded first</option><option value="year_desc" ${state.paperSort === "year_desc" ? "selected" : ""}>Newest first</option><option value="year_asc" ${state.paperSort === "year_asc" ? "selected" : ""}>Oldest first</option><option value="title_asc" ${state.paperSort === "title_asc" ? "selected" : ""}>Title A–Z</option><option value="title_desc" ${state.paperSort === "title_desc" ? "selected" : ""}>Title Z–A</option></select><span class="toolbar-count">${state.paperTotal ?? "—"} papers</span></div>${card("", body)}` : ""}`;
@@ -116,16 +175,31 @@ function papersPage() {
 function gapsPage() {
   const payload = state.gaps?.gaps || state.gaps?.candidates || state.gaps?.results || [];
   const list = Array.isArray(payload) ? payload : [];
-  const content = list.length ? `<div class="gap-list">${list.map((g, i) => { const id = g.gap_id || g.id || `gap-${i + 1}`; const evidence = g.evidence_passages || g.supporting_statements || []; const score = g.gap_score ?? g.score; return `<article class="gap-card"><div class="gap-top"><span class="gap-index">${String(g.rank || i + 1).padStart(2, "0")}</span>${badge(g.status || g.gap_type || "CANDIDATE")}</div><h3>${esc(g.gap_statement || g.title || g.gap || g.statement || "Candidate gap")}</h3><p>${esc(g.rationale || g.description || g.explanation || g.score_notes?.summary || "")}</p>${g.detectors_agreeing?.length ? `<div class="tag-list">${g.detectors_agreeing.map(d => `<span>${esc(d)}</span>`).join("")}</div>` : ""}${evidence.length ? `<details><summary>${evidence.length} supporting evidence items</summary>${evidence.slice(0,4).map(e => `<blockquote>${esc(e.quote || e.sentence || e.text || "")}</blockquote>`).join("")}</details>` : ""}<div class="gap-meta">${score != null ? `<span>Score ${esc(Number(score).toFixed(2))}</span>` : ""}${evidence.length ? `<span>${evidence.length} evidence items</span>` : ""}<code>${esc(id)}</code></div></article>`; }).join("")}</div>` : empty("No candidate gaps yet", "Run the gap identification stage in the pipeline. The candidate list will be loaded from the run API.", `<a class="button outline" href="#pipeline">Open pipeline →</a>`);
+  const selectedCount = state.selectedGapIds.size;
+  const content = list.length ? `<div class="gap-list">${list.map((g, i) => {
+    const id = g.gap_id || g.id || `gap-${i + 1}`;
+    const evidence = g.evidence_passages || g.supporting_statements || [];
+    const score = g.gap_score ?? g.score;
+    const source = g.candidate_source || (g.detectors?.includes("llm") ? "llm" : "signal");
+    const statement = g.gap_statement || g.title || g.gap || g.statement || "Candidate gap";
+    const original = g.wording?.original_statement;
+    const llmProposal = g.llm_proposal;
+    return `<article class="gap-card"><div class="gap-top"><span class="gap-index">${String(g.rank || i + 1).padStart(2, "0")}</span><div class="gap-badges">${badge(source === "signal+llm" ? "Signal + LLM" : source === "llm" ? "LLM proposal" : "Signal based")}${badge(g.status || "CANDIDATE")}</div></div><h3>${esc(statement)}</h3><p>${esc(g.rationale || g.description || g.explanation || g.score_notes?.rationale || g.score_notes?.summary || "")}</p>${original && original !== statement ? `<details class="wording-provenance"><summary>Original signal wording</summary><p>${esc(original)}</p></details>` : ""}${llmProposal ? `<details class="wording-provenance"><summary>Matching LLM proposal</summary><p>${esc(llmProposal.gap_statement)}</p><small>LLM confidence ${esc(llmProposal.confidence)} · ${esc(llmProposal.rationale || "")}</small>${llmProposal.evidence_passages?.length ? `<blockquote>${llmProposal.evidence_passages.slice(0,2).map(p => `${esc(p.title || "Source")}: ${esc(p.snippet || "")}`).join("<br>")}</blockquote>` : ""}</details>` : ""}${g.detectors_agreeing?.length ? `<div class="tag-list">${g.detectors_agreeing.map(d => `<span>${esc(d)}</span>`).join("")}</div>` : ""}${evidence.length ? `<details><summary>${evidence.length} supporting evidence items</summary>${evidence.slice(0,4).map(e => `<blockquote><b>${esc(e.title || e.paper || "")}</b>${e.year ? ` · ${esc(e.year)}` : ""}<span>${esc(e.quote || e.sentence || e.snippet || e.text || "")}</span></blockquote>`).join("")}</details>` : ""}<div class="gap-meta">${score != null ? `<span>Pre-validation score ${esc(Number(score).toFixed(2))}</span>` : ""}${evidence.length ? `<span>${evidence.length} evidence items</span>` : ""}<code>${esc(id)}</code></div><label class="gap-select-label"><input class="gap-select" type="checkbox" data-gap-id="${esc(id)}" ${state.selectedGapIds.has(id) ? "checked" : ""}><span>Select for validation</span></label></article>`;
+  }).join("")}</div>` : empty("No candidate gaps yet", "Run the gap identification stage in the pipeline. The candidate list will be loaded from the run API.", `<a class="button outline" href="#pipeline">Open pipeline →</a>`);
   const stats = state.gaps?.stats || state.gaps?.summary;
-  return `${heading("CANDIDATE GAPS", "Potential gaps, grounded in evidence.", "Review candidate statements and their rationale. Treat these as hypotheses until validation is complete.", `<button class="button outline" data-action="load-gaps" ${state.busy ? "disabled" : ""}>↻ Load candidates</button>`)}${requireRun()}${state.runId ? `${stats ? `<div class="summary-strip">${Object.entries(stats).map(([k,v]) => stat(typeof v === "object" ? JSON.stringify(v) : v, k.replaceAll("_", " "))).join("")}</div>` : ""}${content}` : ""}`;
+  const actions = `<div class="gap-page-actions"><button class="button outline" data-action="load-gaps" ${state.busy ? "disabled" : ""}>↻ Load candidates</button><button class="button green" id="validate-selected-gaps" data-action="go-validate-selected" ${selectedCount ? "" : "disabled"}>Validate selected (${selectedCount}) →</button></div>`;
+  return `${heading("CANDIDATE GAPS", "Potential gaps, grounded in evidence.", "Review candidate statements and their rationale. Signal-based and LLM-proposed candidates are labeled separately; both remain hypotheses until validation.", actions)}${requireRun()}${state.runId ? `${stats ? `<div class="summary-strip">${Object.entries(stats).map(([k,v]) => stat(typeof v === "object" ? JSON.stringify(v) : v, k.replaceAll("_", " "))).join("")}</div>` : ""}${content}` : ""}`;
 }
 function validationPage() {
   const data = state.validation;
   const items = data?.results || data?.validations || data?.validation_results || data?.candidates || [];
   const list = Array.isArray(items) ? items : [];
   const stats = data?.summary || data?.validation_stats;
-  return `${heading("VALIDATION STUDIO", "Test each gap against the literature.", "Validation searches external scholarly sources and records whether evidence supports or contradicts each candidate.", `<button class="button green" data-action="validate" ${state.busy || !state.runId ? "disabled" : ""}>${state.busy ? "Validating…" : "Validate candidates"}</button>`)}${requireRun()}${state.runId ? `<section class="card source-card"><div class="card-body"><div><b>Validation sources</b><small>OpenAlex is the recommended default. Semantic Scholar may be rate limited.</small></div><label><input type="checkbox" checked disabled> Corpus</label><label><input type="checkbox" checked name="source" value="openalex"> OpenAlex</label><label><input type="checkbox" name="source" value="semantic_scholar"> Semantic Scholar</label><label class="field-inline">Per query <input id="per-query" type="number" min="1" max="10" value="5"></label></div></section>${stats ? `<div class="summary-strip">${Object.entries(stats).map(([k,v]) => stat(typeof v === "object" ? JSON.stringify(v) : v, k.replaceAll("_", " "))).join("")}</div>` : ""}${list.length ? `<div class="validation-list">${list.map((v,i) => { const evidence = v.evidence || []; return `<article class="validation-card"><div class="section-head"><span class="eyebrow">CANDIDATE ${String(i+1).padStart(2,"0")}</span>${badge(v.classification || v.status)}</div><h3>${esc(v.gap_title || v.title || v.gap_statement || v.statement || v.gap_id || "Validated candidate")}</h3><p>${esc(v.explanation || v.rationale || v.summary || v.reason || "")}</p>${v.confidence != null ? `<div class="confidence"><span>Confidence</span><b>${esc(typeof v.confidence === "number" ? `${Math.round(v.confidence*100)}%` : v.confidence)}</b></div>` : ""}${evidence.length ? `<details><summary>${evidence.length} evidence items</summary>${evidence.map(e => `<blockquote>${esc(e.text || e.quote || e.title || e.snippet || e.summary || "")}</blockquote>`).join("")}</details>` : ""}</article>`; }).join("")}</div>` : empty("Validation results will appear here", "Run validation to assess candidate gaps against the selected literature sources.")}` : ""}`;
+  const job = state.pipeline.validate || {};
+  const jobPanel = job.job_id ? `<section class="job-status-panel"><div><span class="eyebrow">VALIDATION JOB</span><p>${esc(job.message || "Check the latest status returned by the API.")}</p><code>${esc(job.job_id)}</code></div>${badge(job.status)}<button class="button subtle small" data-action="check-job-status" data-stage="validate" ${state.busy ? "disabled" : ""}>Check status</button>${responseDetails("Job start response (POST)", job.startResponse, false, "validate:start")}${responseDetails("Latest job status response (GET)", job.statusResponse, job.showStatusResponse, "validate:status")}</section>` : "";
+  const validateLabel = state.busy ? "Validating…" : state.selectedGapIds.size ? `Validate selected (${state.selectedGapIds.size})` : "Validate top candidates";
+  const selectionNote = state.selectedGapIds.size ? `<p class="selection-note">Validating ${state.selectedGapIds.size} selected candidate gap(s).</p>` : `<p class="selection-note">No gaps selected. The API will validate the top 10 candidates.</p>`;
+  return `${heading("VALIDATION STUDIO", "Test each gap against the literature.", "Validation searches external scholarly sources and records whether evidence supports or contradicts each candidate.", `<button class="button green" data-action="validate" ${state.busy || !state.runId ? "disabled" : ""}>${validateLabel}</button>`)}${requireRun()}${state.runId ? `${selectionNote}<section class="card source-card"><div class="card-body"><div><b>Validation sources</b><small>OpenAlex is the recommended default. Semantic Scholar may be rate limited.</small></div><label><input type="checkbox" checked disabled> Corpus</label><label><input type="checkbox" checked name="source" value="openalex"> OpenAlex</label><label><input type="checkbox" name="source" value="semantic_scholar"> Semantic Scholar</label><label class="field-inline">Per query <input id="per-query" type="number" min="1" max="10" value="5"></label></div></section>${jobPanel}${stats ? `<div class="summary-strip">${Object.entries(stats).map(([k,v]) => stat(typeof v === "object" ? JSON.stringify(v) : v, k.replaceAll("_", " "))).join("")}</div>` : ""}${list.length ? `<div class="validation-list">${list.map((v,i) => { const evidence = v.evidence || []; return `<article class="validation-card"><div class="section-head"><span class="eyebrow">CANDIDATE ${String(i+1).padStart(2,"0")}</span>${badge(v.classification || v.status)}</div><h3>${esc(v.gap_title || v.title || v.gap_statement || v.statement || v.gap_id || "Validated candidate")}</h3><p>${esc(v.explanation || v.rationale || v.summary || v.reason || "")}</p>${v.confidence != null ? `<div class="confidence"><span>Confidence</span><b>${esc(typeof v.confidence === "number" ? `${Math.round(v.confidence*100)}%` : v.confidence)}</b></div>` : ""}${evidence.length ? `<details><summary>${evidence.length} evidence items</summary>${evidence.map(e => `<blockquote>${esc(e.text || e.quote || e.title || e.snippet || e.summary || "")}</blockquote>`).join("")}</details>` : ""}</article>`; }).join("")}</div>` : empty("Validation results will appear here", "Run validation to assess candidate gaps against the selected literature sources.")}` : ""}`;
 }
 function evidencePage() {
   const vals = state.validation?.results || state.validation?.validations || state.validation?.validation_results || [];
@@ -142,6 +216,9 @@ function reportPage() {
 }
 const views = { workspace, new: newInvestigation, pipeline, literature: papersPage, gaps: gapsPage, validation: validationPage, evidence: evidencePage, report: reportPage };
 async function render() {
+  document.querySelectorAll("details.response-details[data-response-key]").forEach(details => {
+    state.responseDisclosureState.set(details.dataset.responseKey, details.open);
+  });
   state.route = (location.hash.slice(1) || "workspace").split("?")[0]; if (!views[state.route]) state.route = "workspace";
   shell(views[state.route]()); bind();
   if (state.route === "workspace" && !state.runsLoaded) loadRuns();
@@ -154,6 +231,27 @@ function bind() {
   document.querySelector("#query-form")?.addEventListener("submit", onQuery);
   document.querySelector("#load-run-form")?.addEventListener("submit", onLoadRun);
   document.querySelectorAll("[data-action]").forEach(el => el.addEventListener("click", onAction));
+  document.querySelectorAll("details.response-details[data-response-key]").forEach(details => details.addEventListener("toggle", () => {
+    state.responseDisclosureState.set(details.dataset.responseKey, details.open);
+  }));
+  document.querySelector("#llm-wording")?.addEventListener("change", event => {
+    state.gapOptions.llmWording = event.currentTarget.checked;
+    localStorage.setItem("refine.gapOptions", JSON.stringify(state.gapOptions));
+  });
+  document.querySelector("#llm-candidates")?.addEventListener("change", event => {
+    state.gapOptions.llmCandidates = event.currentTarget.checked;
+    localStorage.setItem("refine.gapOptions", JSON.stringify(state.gapOptions));
+  });
+  document.querySelectorAll(".gap-select").forEach(input => input.addEventListener("change", event => {
+    const { gapId } = event.currentTarget.dataset;
+    if (event.currentTarget.checked) state.selectedGapIds.add(gapId);
+    else state.selectedGapIds.delete(gapId);
+    const button = document.querySelector("#validate-selected-gaps");
+    if (button) {
+      button.disabled = state.selectedGapIds.size === 0;
+      button.textContent = `Validate selected (${state.selectedGapIds.size}) →`;
+    }
+  }));
   document.querySelector("#paper-sort")?.addEventListener("change", event => loadPapers(state.paperSearch || "", 0, event.currentTarget.value));
 }
 async function onQuery(event) {
@@ -227,16 +325,25 @@ async function onLoadRun(event) {
 }
 async function selectRun({ runId, question = "", queryId = "", paperCount = 0 }) {
   activeRun(runId, question, queryId);
+  state.selectedGapIds.clear();
   state.papers = []; state.papersLoaded = false; state.gaps = null; state.validation = null; state.graph = null;
   state.pipeline = {}; localStorage.removeItem("refine.pipeline");
 
   // A run with stored validation is a completed investigation: restore its result view
   // instead of presenting an empty, runnable pipeline for it.
-  const [gapsResult, validationResult] = await Promise.allSettled([
-    api(`/gaps/${encodeURIComponent(runId)}?view=full&top=30`),
+  const [gapsResult, validationResult, graphResult] = await Promise.allSettled([
+    api(`/gaps/${encodeURIComponent(runId)}?view=full&top=50`),
     api(`/validate/${encodeURIComponent(runId)}`),
+    api(`/kg/${encodeURIComponent(runId)}?view=summary`),
   ]);
   state.gaps = gapsResult.status === "fulfilled" ? gapsResult.value : { candidates: [] };
+  state.graph = graphResult.status === "fulfilled" ? graphResult.value : null;
+  const persistedStages = gapsResult.status === "fulfilled"
+    ? ["chunks", "represent", "kg", "gaps"]
+    : graphResult.status === "fulfilled" ? ["chunks", "represent", "kg"] : [];
+  for (const stage of persistedStages) state.pipeline[stage] = { status: "COMPLETED", message: `Saved ${stageNames[stage].toLowerCase()} result is available.` };
+  if (validationResult.status === "fulfilled") state.pipeline.validate = { status: "COMPLETED", message: "Saved validation result is available." };
+  savePipeline();
   if (validationResult.status === "fulfilled") {
     state.validation = validationResult.value;
     const completedPhases = Object.fromEntries(["query", "collect", ...stages].map(stage => [stage, "COMPLETED"]));
@@ -260,6 +367,12 @@ async function onAction(event) {
   if (action === "collect") return collect();
   if (action === "run-pipeline") return runPipeline();
   if (action === "run-stage") return runStage(el.dataset.stage);
+  if (action === "check-job-status") return checkJobStatus(el.dataset.stage);
+  if (action === "go-validate-selected") {
+    if (!state.selectedGapIds.size) return toast("Select at least one candidate gap first.", "error");
+    location.hash = "#validation";
+    return;
+  }
   if (action === "load-gaps") return loadGaps(true);
   if (action === "validate") return validateGaps();
   if (action === "load-validation") return loadValidation(true);
@@ -292,41 +405,100 @@ function stageConfig(stage) {
     chunks: { path: "/chunks", body: { run_id: state.runId }, status: id => `/chunks/status/${id}` },
     represent: { path: "/represent", body: { run_id: state.runId }, status: id => `/represent/status/${id}` },
     kg: { path: "/kg/build", body: { run_id: state.runId, query_id: state.queryId || undefined }, status: id => `/kg/status/${id}`, result: () => `/kg/${state.runId}?view=summary` },
-    gaps: { path: "/gaps", body: { run_id: state.runId, query_id: state.queryId || undefined }, status: id => `/gaps/status/${id}`, result: () => `/gaps/${state.runId}?view=full&top=30` },
-    validate: { path: "/validate", body: { run_id: state.runId, gap_ids: null, sources: ["corpus", "openalex"], per_query: Number(document.querySelector("#per-query")?.value || 5), max_iterations: 1 }, status: id => `/validate/status/${id}`, result: () => `/validate/${state.runId}` },
+    gaps: { path: "/gaps", body: { run_id: state.runId, query_id: state.queryId || undefined, detectors: ["explicit", "combination", "temporal", "topics"], llm_wording: Boolean(state.gapOptions.llmWording), include_llm_candidates: Boolean(state.gapOptions.llmCandidates), include_llm_baseline: false }, status: id => `/gaps/status/${id}`, result: () => `/gaps/${state.runId}?view=full&top=50` },
+    validate: { path: "/validate", body: { run_id: state.runId, gap_ids: state.selectedGapIds.size ? [...state.selectedGapIds] : null, sources: ["corpus", "openalex"], per_query: Number(document.querySelector("#per-query")?.value || 5), max_iterations: 1 }, status: id => `/validate/status/${id}`, result: () => `/validate/${state.runId}` },
   };
   return configs[stage];
 }
 async function runStage(stage) {
   if (!state.runId) return toast("Load or create a run first.", "error");
+  const missing = (pipelinePrerequisites[stage] || []).filter(required => state.pipeline[required]?.status !== "COMPLETED");
+  if (missing.length) return toast(`Run ${missing.map(required => sequenceNames[required]).join(" and ")} before ${sequenceNames[stage]}.`, "error");
   const config = stageConfig(stage); if (!config) return;
+  if (stage === "gaps") state.selectedGapIds.clear();
+  invalidateDownstreamStages(stage);
   state.busy = true; state.pipeline[stage] = { status: "RUNNING", message: "Starting job…" }; savePipeline(); render();
   try {
     const started = await post(config.path, config.body); const jobId = started.job_id;
-    state.pipeline[stage] = { status: started.status || "RUNNING", job_id: jobId, message: started.message || "Job started." }; savePipeline(); render();
+    state.pipeline[stage] = { status: started.status || "RUNNING", job_id: jobId, message: started.message || "Job started.", startResponse: started }; savePipeline(); render();
     if (!jobId) throw new Error("The API did not return a job_id.");
     let latest;
     for (let attempt = 0; attempt < 720; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 2500));
       latest = await api(config.status(jobId));
       const status = String(latest.status || "RUNNING").toUpperCase();
-      state.pipeline[stage] = { status, job_id: jobId, message: latest.progress || latest.message || (status === "COMPLETED" ? "Stage completed." : "Working…") };
+      state.pipeline[stage] = { ...state.pipeline[stage], status, job_id: jobId, message: latest.progress || latest.message || (status === "COMPLETED" ? "Stage completed." : "Working…"), statusResponse: latest };
       state.pipeline.currentMessage = `${stageNames[stage]} · ${state.pipeline[stage].message}`; savePipeline(); render();
       if (["COMPLETED", "FAILED", "CANCELLED"].includes(status)) break;
     }
     if (!latest || !["COMPLETED", "FAILED", "CANCELLED"].includes(String(latest.status).toUpperCase())) throw new Error("Job polling timed out after 30 minutes.");
     if (String(latest.status).toUpperCase() !== "COMPLETED") throw new Error(latest.error || latest.message || `${stageNames[stage]} failed.`);
-    state.pipeline[stage] = { status: "COMPLETED", job_id: jobId, message: latest.progress || latest.message || "Stage completed." }; savePipeline();
+    if (stage === "chunks" && Number(latest.result_summary?.chunked || 0) < 1) {
+      throw new Error("Chunking finished without creating chunks. Check section extraction and paper processing before building the knowledge graph.");
+    }
+    if (stage === "represent" && Number(latest.embedded_chunks || 0) < 1) {
+      throw new Error("Representation finished without embedding any chunks. The knowledge graph requires represented chunks.");
+    }
+    state.pipeline[stage] = { ...state.pipeline[stage], status: "COMPLETED", job_id: jobId, message: latest.progress || latest.message || "Stage completed.", statusResponse: latest }; savePipeline();
     if (config.result) {
       const result = await api(config.result());
       if (stage === "gaps") state.gaps = result;
       if (stage === "validate") state.validation = result;
+      state.pipeline[stage].resultResponse = result;
     }
     toast(`${stageNames[stage]} completed.`, "success");
   } catch (e) { state.pipeline[stage] = { ...(state.pipeline[stage] || {}), status: "FAILED", message: e.message }; savePipeline(); toast(`${stageNames[stage]} failed: ${e.message}`, "error"); }
   finally { state.busy = state.fullWorkflow?.status === "RUNNING"; render(); }
 }
-function savePipeline() { localStorage.setItem("refine.pipeline", JSON.stringify(state.pipeline)); }
+async function checkJobStatus(stage) {
+  const config = stageConfig(stage);
+  const existing = state.pipeline[stage] || {};
+  if (!config || !existing.job_id) return toast("This stage does not have a saved job ID to check.", "error");
+  if (state.busy) return;
+  state.busy = true;
+  existing.showStatusResponse = true;
+  state.responseDisclosureState.set(`${stage}:status`, true);
+  state.pipeline[stage] = existing;
+  render();
+  try {
+    const latest = await api(config.status(existing.job_id));
+    const status = String(latest.status || "UNKNOWN").toUpperCase();
+    const outputMissing = (stage === "chunks" && status === "COMPLETED" && Number(latest.result_summary?.chunked || 0) < 1)
+      || (stage === "represent" && status === "COMPLETED" && Number(latest.embedded_chunks || 0) < 1);
+    state.pipeline[stage] = {
+      ...existing,
+      status: outputMissing ? "FAILED" : status,
+      statusResponse: latest,
+      statusCheckedAt: new Date().toISOString(),
+      message: outputMissing
+        ? (stage === "chunks" ? "Job completed without creating chunks." : "Job completed without embedding any chunks.")
+        : (latest.progress || latest.message || latest.error || existing.message),
+      showStatusResponse: true,
+    };
+    if (status === "COMPLETED" && !outputMissing && config.result) {
+      const result = await api(config.result());
+      state.pipeline[stage].resultResponse = result;
+      if (stage === "gaps") state.gaps = result;
+      if (stage === "validate") state.validation = result;
+    }
+    savePipeline();
+    toast(`${stageNames[stage]} status refreshed: ${(outputMissing ? "FAILED" : status).replaceAll("_", " ")}.`, outputMissing || status === "FAILED" ? "error" : "success");
+  } catch (error) {
+    state.pipeline[stage] = { ...(state.pipeline[stage] || existing), statusError: error.message, showStatusResponse: true };
+    toast(`Could not check ${stageNames[stage]}: ${error.message}`, "error");
+  } finally {
+    state.busy = false;
+    savePipeline();
+    render();
+  }
+}
+function savePipeline() {
+  const persisted = Object.fromEntries(Object.entries(state.pipeline).map(([stage, value]) => {
+    const { resultResponse, ...rest } = value || {};
+    return [stage, rest];
+  }));
+  localStorage.setItem("refine.pipeline", JSON.stringify(persisted));
+}
 async function runPipeline() {
   if (!state.runId) return toast("Load or create a run first.", "error");
   state.busy = true; render();
@@ -353,7 +525,15 @@ async function loadPapers(search = "", offset = 0, sortBy = state.paperSort) {
 }
 async function loadGaps(notify = true) {
   if (!state.runId) return;
-  try { state.gaps = await api(`/gaps/${encodeURIComponent(state.runId)}?view=full&top=30`); if (["gaps", "new"].includes(state.route)) render(); if (notify) toast("Candidate gaps loaded.", "success"); }
+  try {
+    state.gaps = await api(`/gaps/${encodeURIComponent(state.runId)}?view=full&top=50`);
+    const availableGapIds = new Set((state.gaps.candidates || []).map(candidate => candidate.gap_id).filter(Boolean));
+    state.selectedGapIds = new Set([...state.selectedGapIds].filter(gapId => availableGapIds.has(gapId)));
+    for (const stage of ["chunks", "represent", "kg", "gaps"]) state.pipeline[stage] = { status: "COMPLETED", message: `Saved ${stageNames[stage].toLowerCase()} result is available.` };
+    savePipeline();
+    if (["gaps", "new"].includes(state.route)) render();
+    if (notify) toast("Candidate gaps loaded.", "success");
+  }
   catch (e) { if (notify) toast(`Could not load gaps: ${e.message}`, "error"); }
 }
 async function loadValidation(notify = true) {
@@ -366,23 +546,45 @@ async function loadValidation(notify = true) {
 async function loadGraph(notify = false) {
   if (!state.runId || state.loadingGraph) return;
   state.loadingGraph = true;
-  try { state.graph = await api(`/kg/${encodeURIComponent(state.runId)}?view=summary`); if (state.route === "evidence") render(); if (notify) toast("Knowledge graph summary loaded.", "success"); }
+  try {
+    state.graph = await api(`/kg/${encodeURIComponent(state.runId)}?view=summary`);
+    for (const stage of ["chunks", "represent", "kg"]) state.pipeline[stage] = { status: "COMPLETED", message: `Saved ${stageNames[stage].toLowerCase()} result is available.` };
+    savePipeline();
+    if (state.route === "evidence") render();
+    if (notify) toast("Knowledge graph summary loaded.", "success");
+  }
   catch (e) { if (notify) toast(`Could not load graph: ${e.message}`, "error"); }
   finally { state.loadingGraph = false; }
 }
 async function validateGaps() {
   if (!state.runId) return;
+  if (state.pipeline.gaps?.status !== "COMPLETED") return toast("Identify candidate gaps before running validation.", "error");
   const sources = ["corpus", ...[...document.querySelectorAll('input[name="source"]:checked')].map(i => i.value)];
   const cfg = stageConfig("validate"); cfg.body.sources = [...new Set(sources)]; cfg.body.per_query = Math.min(10, Math.max(1, Number(document.querySelector("#per-query")?.value || 5)));
   // Keep the same job polling and persistence behavior as pipeline validation.
   state.busy = true; render();
   try {
     const started = await post(cfg.path, cfg.body); if (!started.job_id) throw new Error("The API did not return a job_id.");
+    state.pipeline.validate = { status: started.status || "RUNNING", job_id: started.job_id, message: started.message || "Validation job started.", startResponse: started };
+    savePipeline(); render();
     let latest;
-    for (let i = 0; i < 720; i++) { await new Promise(r => setTimeout(r, 2500)); latest = await api(cfg.status(started.job_id)); if (["COMPLETED", "FAILED", "CANCELLED"].includes(String(latest.status).toUpperCase())) break; }
+    for (let i = 0; i < 720; i++) {
+      await new Promise(r => setTimeout(r, 2500));
+      latest = await api(cfg.status(started.job_id));
+      const status = String(latest.status || "RUNNING").toUpperCase();
+      state.pipeline.validate = { ...state.pipeline.validate, status, statusResponse: latest, message: latest.progress || latest.message || "Working…" };
+      savePipeline(); render();
+      if (["COMPLETED", "FAILED", "CANCELLED"].includes(status)) break;
+    }
     if (String(latest?.status).toUpperCase() !== "COMPLETED") throw new Error(latest?.error || "Validation did not complete.");
-    state.validation = await api(cfg.result()); toast("Gap validation completed.", "success");
-  } catch (e) { toast(`Validation failed: ${e.message}`, "error"); }
+    state.validation = await api(cfg.result());
+    state.pipeline.validate.resultResponse = state.validation;
+    savePipeline();
+    toast("Gap validation completed.", "success");
+  } catch (e) {
+    if (state.pipeline.validate) { state.pipeline.validate = { ...state.pipeline.validate, status: "FAILED", statusError: e.message }; savePipeline(); }
+    toast(`Validation failed: ${e.message}`, "error");
+  }
   finally { state.busy = false; render(); }
 }
 function download(name, content, type = "text/plain") { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([content], { type })); a.download = name; a.click(); URL.revokeObjectURL(a.href); }

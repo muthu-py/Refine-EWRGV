@@ -6,9 +6,14 @@ a per-run **academic knowledge graph**, multi-signal candidate gap detection, an
 - **Prerequisites.** The run has been processed through
   `/query → /collect → /acquire → /parse → /sections → /chunks → /represent`
   (see [api_test_guide.md](api_test_guide.md)).
+- **Required order.** Continue with `/kg/build → /gaps → /validate`. The API rejects
+  `/kg/build` when the run has no chunked papers or no represented chunks (`409`),
+  rejects `/gaps` when no graph exists (`409`), and rejects `/validate` when no
+  candidate gaps have been saved (`409`). The Pipeline UI displays this full
+  sequence and disables later stages until prerequisites complete.
 - Candidate gaps become validated, uncertain, or unsupported only after the Phase 4 evidence and coverage checks.
-- **The LLM never decides that a gap exists**, and its self-reported confidence is never part of the score.
-- `POST /gaps` uses the non-LLM signal detectors and reranked corpus evidence. It does not call an LLM; both LLM options are fixed to `false` in the API contract.
+- Signal detection remains the default. With explicit opt-in, `POST /gaps` can also add grounded LLM-proposed candidates and/or use an LLM to refine signal-candidate wording. An LLM proposal is marked as such and remains a hypothesis until validation.
+- LLM self-reported confidence is displayed as proposal metadata only; it is never treated as evidence or used as the signal candidate score. Proposals must cite retrieved corpus chunks.
 - Reranking is required for this endpoint. If the CrossEncoder is disabled or unavailable, the job fails with an explicit error rather than grounding candidates against unreranked results.
 
 All paths are under `/api/v1/research`.
@@ -82,7 +87,7 @@ Result claims are extracted deterministically from `RESULTS`, `DISCUSSION`, and 
 }
 ```
 
-**Errors:** `404` unknown run, `422` invalid body.
+**Errors:** `404` unknown run, `409` no chunked or represented corpus data, `422` invalid body.
 
 ### What the build does
 
@@ -189,6 +194,7 @@ GET /api/v1/research/kg/{run_id}?view=entities&entity_type=METHOD&limit=10
   "query_id": "57393ebc-7f52-4b7d-9c3e-7ae1f6de28cd",
   "detectors": ["explicit", "combination"],
   "llm_wording": false,
+  "include_llm_candidates": false,
   "include_llm_baseline": false,
   "rebuild_kg": false
 }
@@ -197,9 +203,11 @@ GET /api/v1/research/kg/{run_id}?view=entities&entity_type=METHOD&limit=10
 | Field | Default | Meaning |
 |---|---|---|
 | `detectors` | both | `explicit` (D1) and/or `combination` (D2) |
-| `llm_wording` | `false` (only allowed value) | Reserved for compatibility; `true` is rejected with HTTP 422. The public endpoint does not generate LLM wording |
-| `include_llm_baseline` | `false` (only allowed value) | Reserved for compatibility; `true` is rejected with HTTP 422. The public endpoint does not run the LLM-only detector |
-| `rebuild_kg` | `false` | Rebuilds the KG first. A KG is also built automatically when none exists, or when the stored one was built for a different `query_id` |
+| `llm_wording` | `false` | If true, asks the configured LLM to refine eligible signal-based gap wording using its retrieved supporting evidence. The original wording and provenance are retained; grounding checks can reject a rewrite |
+| `include_llm_candidates` | `false` | If true, adds grounded candidates proposed by the LLM detector. Each candidate records its source and cited corpus evidence. Near duplicates merge with signal candidates and retain both sources |
+| `include_llm_baseline` | `false` | If true, also stores the legacy LLM-only baseline for comparison. When either LLM option is enabled, the detector output is reused within that job |
+| LLM configuration | — | Enabling any LLM option requires a configured provider API key; otherwise the request returns `503` |
+| `rebuild_kg` | `false` | Rebuilds the KG first. The run must already have chunked/represented corpus data and a stored KG unless this flag requests a rebuild |
 
 **Response:** `202`, in the same shape as `/kg/build`. Poll `GET /gaps/status/{job_id}`. On this run the job takes about 11 seconds once the KG exists.
 
@@ -251,6 +259,8 @@ Real output for run `e0b54bcc`, top 1, trimmed:
   "run_id": "e0b54bcc-ebcd-4e77-ae6e-d8e4fb4ef90d",
   "query_id": "57393ebc-7f52-4b7d-9c3e-7ae1f6de28cd",
   "params": {"detectors": ["explicit", "combination"], "llm_wording": false, "include_llm_baseline": false,
+             "llm_wording": false, "include_llm_candidates": false,
+             "include_llm_baseline": false,
              "kg_built_at": "2026-10-19T13:31:47+00:00"},
   "stats": {
     "candidates_per_detector": {"explicit_statements": 26, "combination_sparsity": 10},
@@ -317,8 +327,8 @@ Real output for run `e0b54bcc`, top 1, trimmed:
 
 | Parameter | Effect |
 |---|---|
-| `view=full` | Complete stored candidates, including `structured_representation` (domain, population, methodology, outcome, key_concepts, synonyms from KG aliases) and `original_statement`, plus `llm_baseline` |
-| `view=compare` | Signal-based top-N side by side with a previously stored LLM baseline, if one exists. The public `/gaps` endpoint cannot create a new baseline because `include_llm_baseline: true` is rejected |
+| `view=full` | Complete stored candidates, including source (`signal`, `llm`, or `signal+llm`), wording provenance, `structured_representation`, and matching LLM proposal metadata/evidence, plus `llm_baseline` when requested |
+| `view=compare` | Signal-based top-N side by side with a previously stored LLM baseline, if one exists. Request `include_llm_baseline: true` to create/update it |
 | `top=N` | Number of cards, 1–200 |
 | `detector=explicit_statements \| combination_sparsity` | Only candidates produced by that detector |
 

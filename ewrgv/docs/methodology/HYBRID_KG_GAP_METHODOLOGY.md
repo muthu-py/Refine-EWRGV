@@ -15,7 +15,7 @@ Prepared 2026-10-19. Synthesises:
   - it ignored explicit gap sections;
   - it cited no counter-evidence (0 contradicting passages).
 
-**Core idea.** Detection is driven by a **knowledge graph plus measurable signals**. Each candidate gap is a *hypothesis*, and every number behind it is recorded. **EWRGV validation** then tests each hypothesis against the run corpus **and the external literature**. That validation step is what ResearchRAG lacks, and its absence causes ResearchRAG's spurious gaps. The LLM is optional and only writes wording. It never decides that a gap exists, and its self-reported confidence is never part of the score.
+**Core idea.** Detection is driven by a **knowledge graph plus measurable signals**. Each candidate gap is a *hypothesis*, and every number behind it is recorded. **EWRGV validation** then tests each hypothesis against the run corpus **and the external literature**. That validation step is what ResearchRAG lacks, and its absence causes ResearchRAG's spurious gaps. Signal detection is the default. An LLM can optionally propose additional candidates grounded in retrieved corpus passages or refine the wording of signal candidates; its self-reported confidence is metadata, never evidence or part of a signal gap score. Every candidate remains subject to EWRGV validation.
 
 ---
 
@@ -234,9 +234,9 @@ Then:
 
 Signal: `contradiction = min(n_pos, n_neg) / (n_pos + n_neg)`, together with the number of papers on each side.
 
-### D6 — LLM detector (the existing `GapDetector`, baseline only)
+### D6 — LLM detector (the existing `GapDetector`, optional)
 
-The existing detector, kept as **Baseline 1**. Its candidates enter fusion only in the ablation configuration `+LLM`. Its `initial_confidence` is stored and **never scored**.
+The existing detector, kept as **Baseline 1** for comparison and available as an opt-in proposal source in `/gaps`. Proposal candidates are labeled with their source and cited retrieved corpus chunks. Near-duplicates merge with signal candidates while retaining the LLM proposal metadata. Its `initial_confidence` is stored and **never scored**. The standalone baseline can also be stored separately for `view=compare`.
 
 ---
 

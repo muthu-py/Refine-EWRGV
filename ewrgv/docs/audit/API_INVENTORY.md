@@ -33,13 +33,13 @@ Prefix for all routes: `settings.API_V1_PREFIX`, default `/api/v1`. FastAPI docs
 
 | Method and route | Purpose / request | Response and execution | Status route |
 |---|---|---|---|
-| `POST /research/kg/build` | `KGBuildRequest {run_id,query_id?,relevance_threshold?}` | `202 JobStarted`; uses `asyncio.create_task` for graph worker | `GET /research/kg/status/{job_id}` |
+| `POST /research/kg/build` | `KGBuildRequest {run_id,query_id?,relevance_threshold?}` | `202 JobStarted`; verifies at least one chunked and represented paper first (`409` otherwise), then uses `asyncio.create_task` | `GET /research/kg/status/{job_id}` |
 | `GET /research/kg/status/{job_id}` | Graph job state | `AnalysisJobStatus {job_id,run_id,kind,status,progress,summary,error,...}` | — |
 | `GET /research/kg/{run_id}?view=&entity_type=&limit=` | Read stored KG; views include summary/entities/statements/claims/communities/papers/cytoscape/graphml | JSON or GraphML response; 404 if absent | none |
-| `POST /research/gaps` | `GapDetectRequest {run_id,query_id?,detectors=[explicit,combination,temporal,topics],llm_wording=false,include_llm_baseline=false,rebuild_kg=false}`; `true` for either LLM flag is rejected (422) | `202 JobStarted`; non-LLM signal detectors use bounded, required CrossEncoder-reranked query/expansion context for grounding; reranker disabled/unavailable fails the job | `GET /research/gaps/status/{job_id}` |
+| `POST /research/gaps` | `GapDetectRequest {run_id,query_id?,detectors=[explicit,combination,temporal,topics],llm_wording=false,include_llm_candidates=false,include_llm_baseline=false,rebuild_kg=false}`; LLM options require a configured key (`503` otherwise) | Requires chunk/embedding inputs and a stored KG (`409` if absent); `202 JobStarted`; signal detectors use bounded required CrossEncoder-reranked context. Optional cited LLM proposals merge with signals by near-duplicate matching; optional wording refinement preserves originals and provenance. LLM confidence is not a gap score. | `GET /research/gaps/status/{job_id}` |
 | `GET /research/gaps/status/{job_id}` | Candidate job state | `AnalysisJobStatus` | — |
 | `GET /research/gaps/{run_id}?view=&top=&detector=` | Stored candidates (summary/full/compare views) | Candidate result JSON; 404 if absent | none |
-| `POST /research/validate` | `ValidateGapsRequest {run_id,gap_ids?,sources=[corpus,openalex,semantic_scholar],per_query=10,max_iterations?}`; sources must not be empty | `202 JobStarted`; validation worker via `asyncio.create_task` | `GET /research/validate/status/{job_id}` |
+| `POST /research/validate` | `ValidateGapsRequest {run_id,gap_ids?,sources=[corpus,openalex,semantic_scholar],per_query=10,max_iterations?}`; sources must not be empty | Requires saved gap candidates (`409` if absent); `202 JobStarted`; validation worker via `asyncio.create_task` | `GET /research/validate/status/{job_id}` |
 | `GET /research/validate/status/{job_id}` | Validation job state | `AnalysisJobStatus` | — |
 | `GET /research/validate/{run_id}` | Read stored validation results | Persisted validation JSON; returns 404 when no validated row/results | none |
 

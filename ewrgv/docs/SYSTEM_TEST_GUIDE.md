@@ -262,7 +262,7 @@ Expect these views to agree with the summary counts. The papers view shows each 
 
 ### `POST /gaps`
 
-The default detector set runs D1 through D4. The KG is built automatically if it is missing or belongs to a different query ID.
+The default detector set runs D1 through D4. Complete `/chunks` and `/represent`, then build the KG before calling `/gaps` unless `rebuild_kg` is requested.
 
 ```powershell
 $GapJob = Post-Json "/gaps" @{
@@ -270,6 +270,7 @@ $GapJob = Post-Json "/gaps" @{
     query_id = $QueryId
     detectors = @("explicit", "combination", "temporal", "topics")
     llm_wording = $false
+    include_llm_candidates = $false
     include_llm_baseline = $false
     rebuild_kg = $false
 }
@@ -280,8 +281,9 @@ Allowed detector names are `explicit` (D1), `combination` (D2), `temporal` (D3),
 
 Optional settings:
 
-- `llm_wording: true`: asks the configured LLM to reword eligible candidates; only a grounded rewrite is retained.
-- `include_llm_baseline: true`: also runs the legacy LLM detector for comparison and requires an LLM key.
+- `llm_wording: true`: asks the configured LLM to refine eligible signal candidates from retrieved evidence; the original is retained and only a grounded rewrite is accepted. Requires an LLM key.
+- `include_llm_candidates: true`: merges grounded, chunk-cited LLM proposals into the candidate list with source provenance; near duplicates are marked `signal+llm`. Requires an LLM key.
+- `include_llm_baseline: true`: also stores the legacy LLM-only detector output for comparison. Its output is reused if either other LLM option is enabled. Requires an LLM key.
 - `rebuild_kg: true`: rebuilds the KG before detecting candidates.
 
 ### `GET /gaps/{run_id}` views
@@ -294,7 +296,7 @@ Invoke-RestMethod "$Base/gaps/$RunId?detector=temporal_staleness&top=10"
 Invoke-RestMethod "$Base/gaps/$RunId?detector=topic_density&top=10"
 ```
 
-Expect ranked candidate cards with `gap_statement`, `gap_type`, `gap_score`, `score_breakdown`, detector signals, concepts, evidence passages, counter hints, and a grounding result. These are hypotheses, not externally validated research gaps. `view=compare` includes the LLM baseline only if it was requested when detection ran. A new gap-detection run replaces the saved candidates and invalidates older validation results for that run.
+Expect ranked candidate cards with `gap_statement`, `gap_type`, `gap_score`, `score_breakdown`, detector signals, concepts, evidence passages, counter hints, and a grounding result. `candidate_source` distinguishes `signal`, `llm`, and merged `signal+llm`; LLM candidates include cited evidence and proposal metadata. These are hypotheses, not externally validated research gaps. If no `gap_ids` are provided to validation and LLM candidates exist, up to ten candidates are selected across signal and LLM sources; otherwise the existing top-ten default applies. `view=compare` includes the LLM baseline only if it was requested when detection ran. A new gap-detection run replaces the saved candidates and invalidates older validation results for that run.
 
 ## 14. Validate candidates (Phase 4)
 

@@ -44,7 +44,22 @@ async def run_gap_validation(job: AnalysisJob, store: Any, gap_ids: Optional[lis
             if missing:
                 raise LookupError(f"Unknown gap_id(s) for this run: {', '.join(sorted(missing))}")
         else:
-            candidates = available[:10]
+            signal_candidates = [candidate for candidate in available
+                                 if candidate.get("candidate_source", "signal") != "llm"]
+            llm_candidates = [candidate for candidate in available
+                              if candidate.get("candidate_source") == "llm"]
+            if llm_candidates:
+                # When opt-in LLM proposals exist, include both candidate
+                # sources in the default validation batch instead of letting
+                # the signal-first persisted order exclude every LLM proposal.
+                candidates = []
+                while len(candidates) < 10 and (signal_candidates or llm_candidates):
+                    if signal_candidates and len(candidates) < 10:
+                        candidates.append(signal_candidates.pop(0))
+                    if llm_candidates and len(candidates) < 10:
+                        candidates.append(llm_candidates.pop(0))
+            else:
+                candidates = available[:10]
         if not candidates:
             raise ValueError("There are no candidate gaps to validate.")
 

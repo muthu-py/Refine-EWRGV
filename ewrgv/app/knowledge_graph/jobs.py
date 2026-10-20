@@ -119,7 +119,8 @@ async def run_kg_build(job: AnalysisJob, store: Any, query_id: Optional[str] = N
 
 async def run_gap_detection(job: AnalysisJob, store: Any, query_id: Optional[str] = None,
                             detectors: Optional[list[str]] = None, llm_wording: bool = False,
-                            include_llm_baseline: bool = False, rebuild_kg: bool = False) -> None:
+                            include_llm_baseline: bool = False, include_llm_candidates: bool = False,
+                            rebuild_kg: bool = False) -> None:
     from app.core.config import settings
     from app.core.exceptions import ServiceUnavailableError
     from app.gap_detection.signals.service import GapDetectionService
@@ -150,13 +151,12 @@ async def run_gap_detection(job: AnalysisJob, store: Any, query_id: Optional[str
         query = await resolve_query(job.run_id, query_id or kg.query_id)
 
         llm = None
-        if llm_wording or include_llm_baseline:
+        if llm_wording or include_llm_baseline or include_llm_candidates:
             from app.core.config import settings
             from app.providers.llm.factory import create_llm_provider
 
-            if settings.LLM_API_KEY or settings.OPENROUTER_API_KEY:
-                settings.LLM_TIMEOUT = max(settings.LLM_TIMEOUT, 180)
-                llm = create_llm_provider()
+            settings.LLM_TIMEOUT = max(settings.LLM_TIMEOUT, 180)
+            llm = create_llm_provider()
 
         async def progress(step: str) -> None:
             await _set(job, store, progress=step)
@@ -173,16 +173,32 @@ async def run_gap_detection(job: AnalysisJob, store: Any, query_id: Optional[str
             await external.close()
 
         baseline = None
-        if include_llm_baseline:
-            await _set(job, store, progress="LLM baseline")
-            baseline = await asyncio.to_thread(_llm_baseline, corpus, query, embedder, llm)
+        llm_output = None
+        if include_llm_baseline or include_llm_candidates:
+            await _set(job, store, progress="LLM candidate analysis")
+            llm_output = await asyncio.to_thread(_llm_baseline, corpus, query, embedder, kg, llm)
+
+        candidates = list(result["candidates"])
+        llm_records = (llm_output or {}).get("candidate_records", [])
+        llm_counts = {"llm_candidates_added": 0, "llm_candidates_merged": 0}
+        if include_llm_candidates:
+            candidates, llm_counts = _merge_candidate_sources(candidates, llm_records)
+        if include_llm_baseline and llm_output is not None:
+            baseline = {key: value for key, value in llm_output.items() if key != "candidate_records"}
 
         params = {"query_id": query.get("query_id"), "detectors": detectors or [
                       "explicit_statements", "combination_sparsity", "temporal_staleness", "topic_density"],
-                  "llm_wording": llm_wording and llm is not None, "include_llm_baseline": include_llm_baseline,
+                  "llm_wording": llm_wording and llm is not None,
+                  "include_llm_candidates": include_llm_candidates,
+                  "include_llm_baseline": include_llm_baseline,
                   "kg_built_at": kg.stats.get("built_at")}
-        await repo.save_gaps(job.run_id, query.get("query_id"), params, result["stats"], result["candidates"], baseline)
-        summary = dict(result["stats"])
+        stats = dict(result["stats"])
+        stats.update(llm_counts)
+        if llm_output is not None:
+            stats["llm_candidate_generation_error"] = llm_output.get("error")
+            stats["llm_candidates_proposed"] = len(llm_records)
+        await repo.save_gaps(job.run_id, query.get("query_id"), params, stats, candidates, baseline)
+        summary = dict(stats)
         if baseline is not None:
             summary["llm_baseline_candidates"] = len(baseline.get("candidates", []))
         await _set(job, store, status=JobStatus.COMPLETED, progress="done", summary=summary)
@@ -194,8 +210,8 @@ async def run_gap_detection(job: AnalysisJob, store: Any, query_id: Optional[str
         await store.update_analysis_job(job)
 
 
-def _llm_baseline(corpus: Any, query: dict, embedder: Any, llm: Any) -> dict:
-    """The existing LLM-only detector (Baseline 1) on the same corpus, hybrid retrieval."""
+def _llm_baseline(corpus: Any, query: dict, embedder: Any, kg: KnowledgeGraph, llm: Any) -> dict:
+    """Run the LLM detector against reranked run-corpus evidence."""
     if llm is None:
         return {"error": "No LLM key configured; baseline not run.", "candidates": []}
     from app.core.config import settings
@@ -215,15 +231,17 @@ def _llm_baseline(corpus: Any, query: dict, embedder: Any, llm: Any) -> dict:
         None, None, None, None, None,
         gap_detector=GapDetector(llm, max_candidates=settings.MAX_CANDIDATE_GAPS),
         candidate_ranker=CandidateRanker(), ewrgv_validator=None, top_k_gaps=10, retrieval_top_k=20,
-        retriever_factory=lambda c: RetrievalService(c, embedding_provider=embedder),
+        retriever_factory=lambda c: RetrievalService(c, embedding_provider=embedder, require_reranking=True),
         evidence_scorer=CandidateEvidenceScorer(),
     )
     result = pipeline.run_on_corpus(rq, corpus)
+    candidate_records = [_serialize_llm_candidate(g, corpus, kg) for g in result.top_k_gaps]
     return {
         "detector": "llm (app/gap_detection/detector.py)",
         "model": f"{settings.LLM_PROVIDER}/{settings.LLM_MODEL}",
         "error": result.error,
         "chunks_sent": len(result.retrieved_chunks),
+        "candidate_records": candidate_records,
         "candidates": [
             {
                 "rank": g.rank, "gap_statement": g.gap_statement, "gap_type": g.primary_gap_type.value,
@@ -236,6 +254,108 @@ def _llm_baseline(corpus: Any, query: dict, embedder: Any, llm: Any) -> dict:
             for g in result.top_k_gaps
         ],
     }
+
+
+def _serialize_llm_candidate(gap: Any, corpus: Any, kg: KnowledgeGraph) -> dict:
+    """Adapt a validated LLM proposal to the persisted candidate-gap response shape."""
+    def passage(chunk_id: str, role: str) -> dict:
+        chunk = corpus.get_chunk_by_id(chunk_id)
+        paper = corpus.get_paper_by_id(chunk.paper_id) if chunk else None
+        text = " ".join((chunk.text if chunk else "").split())
+        return {
+            "paper_id": chunk.paper_id if chunk else None,
+            "title": paper.title if paper else None,
+            "year": paper.publication_year if paper else None,
+            "doi": paper.doi if paper else None,
+            "chunk_id": chunk_id,
+            "role": role,
+            "section": chunk.section_title if chunk else None,
+            "section_type": str(chunk.section_type.value if hasattr(chunk.section_type, "value") else chunk.section_type) if chunk else None,
+            "page_start": chunk.page_start if chunk else None,
+            "page_end": chunk.page_end if chunk else None,
+            "snippet": text[:400] + ("..." if len(text) > 400 else ""),
+        }
+
+    assessment = gap.evidence_assessment
+    representation = gap.structured_representation.model_dump() if gap.structured_representation else {}
+    concepts = []
+    for name in representation.get("key_concepts", []):
+        entity = next((value for value in kg.entities.values() if value["name"].casefold() == name.casefold()), None)
+        entity_id = next((key for key, value in kg.entities.items() if value["name"].casefold() == name.casefold()), None)
+        concepts.append({
+            "id": entity_id or name,
+            "name": name,
+            "type": entity["type"] if entity else "CONCEPT",
+            "papers": len(entity["papers"]) if entity else 0,
+        })
+    evidence_passages = [passage(cid, "LLM supporting evidence") for cid in gap.relevant_passages]
+    counter_hints = [passage(cid, "LLM counter evidence") for cid in gap.contradicting_passages]
+    evidence_score = assessment.score if assessment else 0.0
+    rank_score = (gap.metadata.get("ranking") or {}).get("adjusted_score")
+    return {
+        "gap_id": gap.gap_id,
+        "rank": gap.rank,
+        "source_rank": gap.rank,
+        "gap_statement": gap.gap_statement,
+        "original_statement": gap.gap_statement,
+        "gap_type": gap.primary_gap_type.value,
+        "status": "candidate",
+        "candidate_source": "llm",
+        "detectors": ["llm"],
+        "gap_score": evidence_score,
+        "rank_score": rank_score,
+        "score_breakdown": {
+            "candidate_source": "llm",
+            "llm_confidence": gap.initial_confidence,
+            "pre_validation_evidence_score": evidence_score,
+        },
+        "score_notes": {"stating_papers": len(set(gap.source_papers)), "rationale": gap.metadata.get("rationale")},
+        "concepts": concepts,
+        "signals": {"llm": {"confidence": gap.initial_confidence, "rationale": gap.metadata.get("rationale")}},
+        "supporting_statements": [],
+        "evidence_passages": evidence_passages,
+        "counter_hints": counter_hints,
+        "grounding": {
+            "grounded": bool(evidence_passages),
+            "method": "validated retrieved chunk IDs",
+            "attempts": 0,
+        },
+        "structured_representation": representation,
+    }
+
+
+def _merge_candidate_sources(signal_candidates: list[dict], llm_candidates: list[dict]) -> tuple[list[dict], dict]:
+    """Combine sources while merging near-duplicate LLM proposals into signal candidates."""
+    from app.gap_detection.ranking import CandidateRanker, _alphanumeric_key, _normalise_statement, _statement_tokens
+
+    ranker = CandidateRanker()
+    combined = [dict(candidate, candidate_source=candidate.get("candidate_source", "signal")) for candidate in signal_candidates]
+    added = merged = 0
+    for llm_candidate in llm_candidates:
+        llm_key = _normalise_statement(llm_candidate["gap_statement"])
+        llm_signature = (_alphanumeric_key(llm_key), _statement_tokens(llm_key))
+        duplicate = next((candidate for candidate in combined if ranker._is_near_duplicate(
+            (_alphanumeric_key(_normalise_statement(candidate["gap_statement"])),
+             _statement_tokens(_normalise_statement(candidate["gap_statement"]))),
+            llm_signature,
+        )), None)
+        if duplicate is not None:
+            duplicate["candidate_source"] = "signal+llm"
+            duplicate["detectors"] = list(dict.fromkeys([*duplicate.get("detectors", []), "llm"]))
+            duplicate["llm_proposal"] = {
+                "gap_statement": llm_candidate["gap_statement"],
+                "confidence": llm_candidate["score_breakdown"]["llm_confidence"],
+                "rationale": llm_candidate["score_notes"].get("rationale"),
+                "source_rank": llm_candidate.get("source_rank"),
+                "evidence_passages": llm_candidate.get("evidence_passages", []),
+            }
+            merged += 1
+            continue
+        llm_candidate = dict(llm_candidate)
+        llm_candidate["rank"] = len(combined) + 1
+        combined.append(llm_candidate)
+        added += 1
+    return combined, {"llm_candidates_added": added, "llm_candidates_merged": merged}
 
 
 # ---------------------------------------------------------------------- #
@@ -335,6 +455,9 @@ def _card(c: dict) -> dict:
         "gap_statement": c["gap_statement"],
         "gap_type": c["gap_type"],
         "status": c["status"],
+        "candidate_source": c.get("candidate_source", "signal"),
+        "wording": c.get("wording"),
+        "llm_proposal": c.get("llm_proposal"),
         "gap_score": c["gap_score"],
         "rank_score": c.get("rank_score"),
         "score_breakdown": c["score_breakdown"],

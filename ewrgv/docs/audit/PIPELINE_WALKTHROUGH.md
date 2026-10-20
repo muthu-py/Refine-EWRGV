@@ -24,9 +24,14 @@ sequenceDiagram
   Client->>API: POST parse → sections → chunks → represent
   API->>Worker: each is a separate job
   Worker->>DB: stage status/paths and chunk embeddings
-  Client->>API: POST /research/kg/build, then /research/gaps
-  Worker->>DB: save graph and candidate JSONB by run
-  Client->>API: POST /validate
+  Client->>API: POST /research/kg/build (requires chunks + embeddings)
+  API->>DB: verify chunked and represented paper status
+  API->>Worker: schedule KG job
+  Worker->>DB: save graph for run
+  Client->>API: POST /research/gaps (requires stored KG)
+  API->>Worker: schedule signal detection job
+  Worker->>DB: save candidate JSONB by run
+  Client->>API: POST /validate (requires saved candidates)
   Worker->>Providers: external support/counter searches
   Worker->>DB: save validation results, stats, timestamp
   Client->>API: GET status/results endpoints
@@ -45,8 +50,8 @@ sequenceDiagram
 | 7. Section extraction | **Partial** — heading detection, classification, normalization and extractor. | Parsed document → section records/artifact and `section_status`. | Depends on parsing. Headingless documents and noisy layouts may be unclassified; heuristics require quality validation. |
 | 8. Chunking and corpus | **Partial** — configurable chunker and `RunCorpusLoader`. | Sections → chunks with IDs, section types, paper provenance; corpus loads chunks/papers for a run. | Depends on sections. Artifact-path consistency, reruns and stage prerequisites matter. Existing unit tests. |
 | 9. Embedding and retrieval | **Partial** — OpenAI/SentenceTransformer providers, representation worker, pgvector repository, BM25, hybrid retrieval with fusion, filters and CrossEncoder reranking. Public retrieval/validation callers require reranking and fail closed. | Chunks → embedding vectors and BM25 artifact; query → reranked `PaperChunk` results. | Depends on chunking. Model/dimension mismatch risk; migration 08 reset needed; no ANN index in migrations. CrossEncoder loads lazily; model/runtime availability remains an operational dependency. |
-| 10. Candidate identification | **Partial** — KG builder and `GapDetectionService` support signal candidates: explicit statements, sparse concept combinations, temporal trends, sparse topics, fusion/ranking. Public `/gaps` is signal-only, rejects LLM flags and grounds candidates using bounded required CrossEncoder-reranked query/expansion context. Separate LLM `GapDetector` remains outside that API. | Run corpus + query → KG and ranked, provenance-bearing candidates; saves per-run JSONB. | Depends on embeddings, corpus, query record and CrossEncoder availability. Inadequate corpus can produce false sparsity; grounding and detector evaluation remain necessary. |
-| 11. Evidence-weighted validation | **Partial** — `EWRGVValidator`; direct, terminology, method, counter searches; evidence classifier/aggregator; coverage metrics; `EWRGVConfidenceScorer`; explanation chain. | Candidate IDs → validation evidence, coverage, confidence and `VALID_GAP`/`UNCERTAIN_GAP`/`UNSUPPORTED_GAP`; result stored under `gap_detection_results`. | Depends on candidate row, corpus/retrieval/embedder and optional external services. Source unavailability, low coverage, or persistence failure must not produce false completion. Tests exist; historical reports of missing persisted validation. |
+| 10. Candidate identification | **Partial** — KG builder and `GapDetectionService` support signal candidates: explicit statements, sparse concept combinations, temporal trends, sparse topics, fusion/ranking. Public `/gaps` defaults to signals and grounds them using bounded required CrossEncoder-reranked query/expansion context. Opt-in LLM detector proposals are merged with provenance and cited retrieved chunks; opt-in wording refinement preserves the original statement. | Run corpus + query → KG and ranked, provenance-bearing candidates; optionally include LLM proposals/refinement; saves per-run JSONB. | Depends on embeddings, corpus, query record and CrossEncoder availability. API requires the stored KG before `/gaps`; incomplete corpus inputs and missing KG return `409`. LLM options require configured credentials. Inadequate corpus can produce false sparsity; grounding and detector evaluation remain necessary. |
+| 11. Evidence-weighted validation | **Partial** — `EWRGVValidator`; direct, terminology, method, counter searches; evidence classifier/aggregator; coverage metrics; `EWRGVConfidenceScorer`; explanation chain. | Candidate IDs → validation evidence, coverage, confidence and `VALID_GAP`/`UNCERTAIN_GAP`/`UNSUPPORTED_GAP`; result stored under `gap_detection_results`. | Depends on saved candidate rows, corpus/retrieval/embedder and optional external services. API returns `409` before job creation when no candidate result exists. Source unavailability, low coverage, or persistence failure must not produce false completion. Tests exist; historical reports of missing persisted validation. |
 
 ## Scoring and interpretation
 
@@ -54,4 +59,4 @@ sequenceDiagram
 
 ## End-to-end status
 
-All listed stages have some source implementation, but several are partial and no evidence establishes a successful full run in the current configured environment. Operators/UI must launch stages in order and poll different status routes. There is no durable pipeline run state, dependency gate, global retry/resume endpoint, or service-level guarantee after restart. “End-to-end” in README describes the product goal, not verified runtime behavior.
+All listed stages have some source implementation, but several are partial and no evidence establishes a successful full run in the current configured environment. The Pipeline UI now shows query and collection ahead of the eight processing jobs, gates each stage on its prerequisites, and clears downstream completion when an earlier job is rerun. The KG, gap, and validation API routes also reject missing persisted prerequisites before scheduling work. Earlier processing endpoints remain separate jobs, and there is no durable pipeline run state, global retry/resume endpoint, or service-level guarantee after restart. “End-to-end” in README describes the product goal, not verified runtime behavior.

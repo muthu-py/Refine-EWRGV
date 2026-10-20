@@ -16,9 +16,19 @@ The implementation lives in `app/ui/` and is served from FastAPI at `/`. It uses
 
 ## Screens and workflow
 
-The responsive interface includes the workspace, query expansion, literature collection, stage-by-stage pipeline, literature explorer, candidate gaps, validation, evidence map, and Markdown report. The pipeline follows the backend stages in order: acquisition, parsing, section extraction, chunking, representation, knowledge-graph construction, gap detection, and validation. Each stage can also be started separately. Collection is deliberately separate from the remaining pipeline so users can inspect partial collection results before starting processing.
+The responsive interface includes the workspace, query expansion, literature collection, stage-by-stage pipeline, literature explorer, candidate gaps, validation, evidence map, and Markdown report. The Pipeline screen shows the full ordered sequence: query understanding → literature collection → acquisition → parsing → section extraction → chunking → representation → knowledge-graph construction → signal-first gap identification (with opt-in LLM proposals and wording refinement) → validation. Query and collection appear as completed context for an already-created run; the Full Investigation screen runs them before processing. Processing jobs are individually startable only after their prerequisites complete. KG construction additionally requires chunked and represented corpus data, and a rerun of an earlier stage clears downstream completion state. Collection can still be reviewed before processing from the separate Full Investigation flow.
 
-The UI stores the selected run and question in browser local storage. Background jobs are polled from the corresponding API status routes. Job state itself lives in the backend process, so a server restart may require starting an interrupted stage again. Validation defaults to the local corpus and OpenAlex; Semantic Scholar is an optional source because it can be rate limited.
+The UI stores the selected run, question, and opt-in gap options in browser local storage. Candidate cards identify signal/LLM provenance and allow selecting candidates for validation; default validation includes up to ten candidates, balanced across sources when LLM proposals exist. Background jobs are polled from the corresponding API status routes. Job state itself lives in the backend process, so a server restart may require starting an interrupted stage again. Validation defaults to the local corpus and OpenAlex; Semantic Scholar is an optional source because it can be rate limited.
+
+Every API request also updates a collapsible **Latest API response** panel with
+the HTTP method, endpoint, status code, and indented JSON response. Pipeline
+stages with a saved job ID expose a **Check status** action that calls that
+stage's GET status route and shows the current response on the stage card. The
+disclosure preserves its open/closed state across UI rerenders, including while
+a background job is being polled. The Validation screen includes the same action
+for validation jobs. These response
+views use escaped, read-only JSON so request output remains inspectable without
+replacing the task-focused result cards.
 
 ## Start it
 

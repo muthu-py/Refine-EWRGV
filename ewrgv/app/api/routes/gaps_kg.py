@@ -43,11 +43,14 @@ class GapDetectRequest(BaseModel):
     detectors: list[Literal["explicit", "combination", "explicit_statements", "combination_sparsity",
                             "temporal", "temporal_staleness", "topics", "topic_density"]] = Field(
         default_factory=lambda: ["explicit", "combination", "temporal", "topics"])
-    llm_wording: Literal[False] = Field(
-        False, description="LLM wording is disabled for the signal-based /gaps API."
+    llm_wording: bool = Field(
+        False, description="Optionally use the configured LLM to refine signal-based candidate wording."
     )
-    include_llm_baseline: Literal[False] = Field(
-        False, description="The LLM baseline is disabled for the signal-based /gaps API."
+    include_llm_candidates: bool = Field(
+        False, description="Optionally add grounded candidates proposed by the LLM to the candidate list."
+    )
+    include_llm_baseline: bool = Field(
+        False, description="Optionally include a separate LLM baseline comparison in the GET response."
     )
     rebuild_kg: bool = Field(False, description="Rebuild the knowledge graph first")
 
@@ -91,6 +94,39 @@ async def _require_run(run_id: str) -> None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found.")
 
 
+async def _require_chunked_and_represented(run_id: str) -> None:
+    """Reject analysis jobs unless this run has persisted chunk and embedding inputs."""
+    from app.storage.relational.database import get_db_pool  # noqa: PLC0415
+
+    pool = await get_db_pool()
+    row = await pool.fetchrow(
+        """SELECT
+               COUNT(DISTINCT p.paper_id) FILTER (
+                   WHERE p.chunk_status = 'CHUNKED'
+               ) AS chunked,
+               COUNT(DISTINCT p.paper_id) FILTER (
+                   WHERE p.chunk_status = 'CHUNKED'
+                     AND p.embedding_status IN ('EMBEDDED', 'PARTIAL')
+               ) AS represented
+           FROM papers p
+           JOIN paper_sources ps ON ps.paper_id = p.paper_id
+           WHERE ps.run_id = $1""",
+        run_id,
+    )
+    chunked = int(row["chunked"] or 0) if row else 0
+    represented = int(row["represented"] or 0) if row else 0
+    if chunked < 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"run_id '{run_id}' has no chunks. Run /chunks after /sections before /kg/build.",
+        )
+    if represented < 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"run_id '{run_id}' has no represented chunks. Run /represent after /chunks before /kg/build.",
+        )
+
+
 async def _job_status(req: Request, job_id: str, kind: str) -> AnalysisJobStatus:
     job = await req.app.state.job_store.get_analysis_job(job_id)
     if job is None or job.kind != kind:
@@ -108,6 +144,7 @@ async def build_kg(payload: KGBuildRequest, req: Request) -> JobStarted:
     from app.knowledge_graph.jobs import run_kg_build  # noqa: PLC0415
 
     await _require_run(payload.run_id)
+    await _require_chunked_and_represented(payload.run_id)
     job = await req.app.state.job_store.create_analysis_job(payload.run_id, "kg_build")
     asyncio.create_task(run_kg_build(job, req.app.state.job_store, payload.query_id, payload.relevance_threshold))
     return JobStarted(job_id=job.job_id, run_id=payload.run_id, status=job.status.value,
@@ -156,12 +193,29 @@ async def detect_gaps(payload: GapDetectRequest, req: Request) -> JobStarted:
         raise ServiceUnavailableError(
             "Cross-encoder reranking is required for /research/gaps; set RERANK_ENABLED=true."
         )
+    if payload.llm_wording or payload.include_llm_candidates or payload.include_llm_baseline:
+        provider = (settings.LLM_PROVIDER or "openrouter").lower().strip()
+        has_key = bool(settings.LLM_API_KEY) or (
+            provider in ("openrouter", "open_router") and bool(settings.OPENROUTER_API_KEY)
+        )
+        if not has_key:
+            raise ServiceUnavailableError(
+                "LLM-assisted gap options require a configured API key for the selected LLM provider."
+            )
     await _require_run(payload.run_id)
+    await _require_chunked_and_represented(payload.run_id)
+    from app.storage.relational.database import get_db_pool  # noqa: PLC0415
+    from app.storage.repositories.kg_repository import KnowledgeGraphRepository  # noqa: PLC0415
+    if await KnowledgeGraphRepository(await get_db_pool()).get_graph(payload.run_id) is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"No knowledge graph for run_id '{payload.run_id}'. Run /kg/build after /chunks and /represent before /gaps.",
+        )
     job = await req.app.state.job_store.create_analysis_job(payload.run_id, "gap_detection")
     asyncio.create_task(run_gap_detection(
         job, req.app.state.job_store, query_id=payload.query_id, detectors=list(payload.detectors),
         llm_wording=payload.llm_wording, include_llm_baseline=payload.include_llm_baseline,
-        rebuild_kg=payload.rebuild_kg,
+        include_llm_candidates=payload.include_llm_candidates, rebuild_kg=payload.rebuild_kg,
     ))
     return JobStarted(job_id=job.job_id, run_id=payload.run_id, status=job.status.value,
                       message=f"Gap detection started. Poll GET /api/v1/research/gaps/status/{job.job_id}.")
@@ -192,8 +246,15 @@ async def get_gaps(
 @router.post("/validate", response_model=JobStarted, status_code=202, summary="Validate candidate gaps")
 async def validate_gaps(payload: ValidateGapsRequest, req: Request) -> JobStarted:
     from app.validation.jobs import run_gap_validation  # noqa: PLC0415
+    from app.storage.relational.database import get_db_pool  # noqa: PLC0415
+    from app.storage.repositories.kg_repository import KnowledgeGraphRepository  # noqa: PLC0415
 
     await _require_run(payload.run_id)
+    if await KnowledgeGraphRepository(await get_db_pool()).get_gaps(payload.run_id) is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"No candidate gaps for run_id '{payload.run_id}'. Run /gaps after /kg/build before /validate.",
+        )
     if not payload.sources:
         raise HTTPException(status_code=422, detail="Select at least one validation source.")
     job = await req.app.state.job_store.create_analysis_job(payload.run_id, "gap_validation")

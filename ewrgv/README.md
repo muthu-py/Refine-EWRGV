@@ -42,24 +42,26 @@ durable, restart-safe end-to-end run coordinator.
 | EWRGV validation | 🟡 Implemented; depends on corpus and external sources |
 | Retrieval API | ✅ Dense, sparse, hybrid, and multi-query endpoints |
 | Cross-encoder reranking | ✅ Enabled by default for retrieval APIs |
-| Candidate gap identification | ✅ Knowledge-graph signal detectors; `/gaps` is non-LLM |
+| Candidate gap identification | ✅ Signal detectors by default; optional grounded LLM proposals and LLM wording |
 | API | ✅ Health, research, knowledge-graph, gap, and validation routes |
 | Config & logging | ✅ Complete |
 | LLM / embedding providers | 🟡 Configurable; query understanding and embeddings may use providers |
 | Literature collectors | ✅ Semantic Scholar and OpenAlex |
 | Frontend | 🟡 API-served interface |
 
-`POST /api/v1/research/gaps` generates candidates with explicit-statement,
-combination-sparsity, temporal-staleness, and topic-density signals. It does
-not call an LLM; requests that enable LLM wording or the LLM baseline are
-rejected. Cross-encoder retrieval supplies ranked passages for grounding.
+`POST /api/v1/research/gaps` uses explicit-statement, combination-sparsity,
+temporal-staleness, and topic-density signals by default. Optional request
+flags can add LLM-proposed candidates grounded in reranked corpus passages and
+use an LLM to refine signal-candidate wording. Both options are off by default;
+candidate source is retained in the response, and every candidate still needs
+EWRGV validation. Cross-encoder retrieval supplies ranked passages for grounding.
 
 Reranking uses `cross-encoder/ms-marco-MiniLM-L-6-v2` by default and lazily
 loads it on the first non-empty retrieval request. Install runtime dependencies
 with `pip install -r requirements.txt`. If the model cannot load or score, API
 retrieval fails clearly instead of returning unreranked results. Embedding and
-query-understanding APIs may still use their configured providers; the `/gaps`
-candidate detector itself is signal-based.
+query-understanding APIs may also use their configured providers; the signal
+detectors remain the default candidate-generation method for `/gaps`.
 
 ---
 
@@ -170,6 +172,11 @@ pytest tests/ -v
 See [docs/gaps_kg_api.md](docs/gaps_kg_api.md) and
 [docs/retrieval_api.md](docs/retrieval_api.md) for request requirements,
 configuration, and error behavior.
+
+Run the research APIs in order: `/query` → `/collect` → `/acquire` → `/parse` →
+`/sections` → `/chunks` → `/represent` → `/kg/build` → `/gaps` → `/validate`.
+The analysis routes reject missing persisted prerequisites with `409`; the UI
+Pipeline screen shows and gates this same sequence.
 
 ---
 

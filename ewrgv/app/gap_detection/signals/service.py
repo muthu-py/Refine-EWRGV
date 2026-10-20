@@ -7,8 +7,8 @@ End-to-end signal-based gap detection for one run.
                 -> (optional LLM wording, gated) -> rank -> readable candidates
 
 The LLM never decides that a gap exists and its confidence is never scored.
-With ``llm_wording`` it only rewrites the statement of multi-statement
-candidates; the rewrite is kept only if it passes the grounding gate.  With
+With ``llm_wording`` it only rewrites candidate wording based on its existing
+evidence; the rewrite is kept only if it passes the grounding gate. With
 ``include_llm_baseline`` the existing LLM detector (app/gap_detection/
 detector.py) is run on the same corpus and stored separately for comparison.
 """
@@ -192,6 +192,7 @@ class GapDetectionService:
             "original_statement": statement,
             "gap_type": gtype.value,
             "status": "candidate",
+            "candidate_source": "signal",
             "detectors": list(dict.fromkeys(group["detectors"])),
             **scored,
             "concepts": [
@@ -299,17 +300,24 @@ class GapDetectionService:
             c["status"] = "uncertain"
 
     async def _reword(self, c: dict) -> None:
-        if len(c["supporting_statements"]) < 2:
+        evidence = [s["sentence"] for s in c["supporting_statements"] if s.get("sentence")]
+        if not evidence:
+            evidence = [p["snippet"] for p in c["evidence_passages"]
+                        if p.get("snippet") and not str(p.get("role", "")).lower().startswith(("counter", "contradict"))]
+        if not evidence:
             return
         from app.gap_detection.llm_call import call_structured_llm
         import asyncio
 
-        quotes = "\n".join(f"- {s['sentence']}" for s in c["supporting_statements"][:6])
+        original = c.get("original_statement") or c["gap_statement"]
+        quotes = "\n".join(f"- {text}" for text in evidence[:6])
         prompt = (
-            "Several papers state the following limitations or open problems:\n"
-            f"{quotes}\n\n"
-            "Write ONE specific sentence describing the research gap they share. Use only information "
-            "in these statements; do not add methods, datasets or claims. Return JSON {\"gap_statement\": \"...\"}."
+            "Rewrite this research-gap candidate as one clear, specific sentence for a research interface. "
+            "This is wording only: preserve its scope and uncertainty, do not strengthen it into a novelty claim, "
+            "and do not add methods, datasets, populations, or claims that are not already supported.\n\n"
+            f"Original candidate: {original}\n\n"
+            f"Supporting passages:\n{quotes}\n\n"
+            "Return JSON {\"gap_statement\": \"...\"}."
         )
         schema = {"type": "object", "properties": {"gap_statement": {"type": "string"}}, "required": ["gap_statement"]}
         try:
@@ -324,9 +332,15 @@ class GapDetectionService:
         best = max((_cos(vec, v) for v in self._evidence_vectors(c)), default=0.0)
         if best >= GROUNDING_THRESHOLD:
             c["gap_statement"] = text
-            c["wording"] = {"source": "llm", "grounding_similarity": round(best, 4)}
+            c["wording"] = {
+                "source": "llm", "original_statement": original,
+                "grounding_similarity": round(best, 4),
+            }
         else:
-            c["wording"] = {"source": "original", "rejected_llm_wording": text, "grounding_similarity": round(best, 4)}
+            c["wording"] = {
+                "source": "original", "original_statement": original,
+                "rejected_llm_wording": text, "grounding_similarity": round(best, 4),
+            }
 
 
 async def _report(progress, step: str) -> None:
