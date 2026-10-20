@@ -120,6 +120,8 @@ async def run_kg_build(job: AnalysisJob, store: Any, query_id: Optional[str] = N
 async def run_gap_detection(job: AnalysisJob, store: Any, query_id: Optional[str] = None,
                             detectors: Optional[list[str]] = None, llm_wording: bool = False,
                             include_llm_baseline: bool = False, rebuild_kg: bool = False) -> None:
+    from app.core.config import settings
+    from app.core.exceptions import ServiceUnavailableError
     from app.gap_detection.signals.service import GapDetectionService
     from app.providers.embeddings.factory import create_embedding_provider
     from app.retrieval.service import RetrievalService
@@ -129,6 +131,11 @@ async def run_gap_detection(job: AnalysisJob, store: Any, query_id: Optional[str
 
     await _set(job, store, status=JobStatus.RUNNING, started_at=datetime.now(timezone.utc), progress="loading")
     try:
+        if not settings.RERANK_ENABLED:
+            raise ServiceUnavailableError(
+                "Cross-encoder reranking is required for signal-based gap detection; "
+                "set RERANK_ENABLED=true."
+            )
         embedder = create_embedding_provider()
         repo = KnowledgeGraphRepository(await get_db_pool())
         stored = None if rebuild_kg else await repo.get_graph(job.run_id)
@@ -157,7 +164,9 @@ async def run_gap_detection(job: AnalysisJob, store: Any, query_id: Optional[str
         domain = (query.get("understanding") or {}).get("domain")
         external = ExternalLiterature()
         try:
-            service = GapDetectionService(kg, corpus, embedder, retrieval=RetrievalService(corpus, embedder),
+            service = GapDetectionService(kg, corpus, embedder, retrieval=RetrievalService(
+                corpus, embedder, require_reranking=True
+            ),
                                           llm=llm, domain=domain, external=external)
             result = await service.run(detectors=detectors, llm_wording=llm_wording, progress=progress)
         finally:

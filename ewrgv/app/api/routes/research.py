@@ -759,7 +759,9 @@ async def _build_retrieval_service(run_id: str, with_dense: bool) -> Any:
                 "(and /represent for dense retrieval) first."
             ),
         )
-    return RetrievalService(corpus, embedding_provider=embedding_provider)
+    return RetrievalService(
+        corpus, embedding_provider=embedding_provider, require_reranking=True
+    )
 
 
 def _filters_from(request: RetrieveFilterFields) -> Any:

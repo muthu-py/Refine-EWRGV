@@ -43,8 +43,12 @@ class GapDetectRequest(BaseModel):
     detectors: list[Literal["explicit", "combination", "explicit_statements", "combination_sparsity",
                             "temporal", "temporal_staleness", "topics", "topic_density"]] = Field(
         default_factory=lambda: ["explicit", "combination", "temporal", "topics"])
-    llm_wording: bool = Field(False, description="Let the LLM rephrase multi-statement gaps (kept only if grounded)")
-    include_llm_baseline: bool = Field(False, description="Also run the LLM-only detector for comparison (1 LLM call)")
+    llm_wording: Literal[False] = Field(
+        False, description="LLM wording is disabled for the signal-based /gaps API."
+    )
+    include_llm_baseline: Literal[False] = Field(
+        False, description="The LLM baseline is disabled for the signal-based /gaps API."
+    )
     rebuild_kg: bool = Field(False, description="Rebuild the knowledge graph first")
 
 
@@ -144,8 +148,14 @@ async def get_kg(
 
 @router.post("/gaps", response_model=JobStarted, status_code=202, summary="Detect candidate gaps (signal-based)")
 async def detect_gaps(payload: GapDetectRequest, req: Request) -> JobStarted:
+    from app.core.config import settings
+    from app.core.exceptions import ServiceUnavailableError
     from app.knowledge_graph.jobs import run_gap_detection  # noqa: PLC0415
 
+    if not settings.RERANK_ENABLED:
+        raise ServiceUnavailableError(
+            "Cross-encoder reranking is required for /research/gaps; set RERANK_ENABLED=true."
+        )
     await _require_run(payload.run_id)
     job = await req.app.state.job_store.create_analysis_job(payload.run_id, "gap_detection")
     asyncio.create_task(run_gap_detection(

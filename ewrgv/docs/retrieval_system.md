@@ -107,7 +107,7 @@ Reference: Cormack, Clarke & Buettcher (2009), SIGIR '09.
 
 ### 6. RetrievalService
 
-**File:** `app/retrieval/service.py` — `RetrievalService(corpus_store, embedding_provider=None)`
+**File:** `app/retrieval/service.py` — `RetrievalService(corpus_store, embedding_provider=None, require_reranking=False)`
 
 Dispatches `dense`, `sparse` or `hybrid`.  Without an embedding provider,
 `dense` raises `BadRequestError` and `hybrid` falls back to BM25.
@@ -115,13 +115,17 @@ Dispatches `dense`, `sparse` or `hybrid`.  Without an embedding provider,
 and any missing chunk texts with the provider's async API first, so the
 sync retrievers never call the network inside the event loop.
 
-When `RERANK_ENABLED=true`, the service caps the candidate pool and scores the
+Reranking is enabled by default. The service caps the candidate pool and scores the
 leading query/passage pairs with a lazily loaded SentenceTransformers
 CrossEncoder, then applies the per-paper cap and `top_k`. The original retrieval
 score remains in `RetrievalResult.score`; raw reranker logits and reranking
-status are recorded in metadata. The optional dependency is installed with
-`pip install -e ".[sentence-transformers]"`. See `retrieval_api.md` for the
-environment variables and failure policy.
+status are recorded in metadata. API retrieval, validation and gap-detection
+callers set `require_reranking=True`, so disabled or failed reranking is an
+error rather than a silent fallback. The `/gaps` job also fetches bounded,
+reranked query/expansion context before signal detection and uses it in the
+textual-candidate grounding gate. Install runtime dependencies with
+`pip install -e .` or `pip install -r requirements.txt`. See `retrieval_api.md`
+for environment variables and failure policy.
 
 ### 7. Unified Retrieval Result
 

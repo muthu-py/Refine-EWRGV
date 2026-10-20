@@ -19,6 +19,7 @@ import math
 from typing import Any, Optional
 from uuid import uuid4
 
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.gap_detection.signals.combination import DETECTOR as D2, detect_combinations
 from app.gap_detection.signals.explicit import DETECTOR as D1, RawCandidate, detect_explicit
@@ -65,6 +66,20 @@ class GapDetectionService:
     async def run(self, detectors: Optional[list[str]] = None, llm_wording: bool = False,
                   progress=None) -> dict:
         import asyncio
+
+        if self._retrieval is not None:
+            await _report(progress, "retrieving and reranking gap evidence")
+            from app.retrieval.filters import RetrievalFilters
+
+            retrieval_queries = list(dict.fromkeys(
+                q.strip() for q in self._queries if q and q.strip()
+            ))
+            self._context["reranked_query_results"] = await self._retrieval.aretrieve_many(
+                retrieval_queries,
+                top_k=min(100, settings.RERANK_MAX_CANDIDATES),
+                method="hybrid",
+                filters=RetrievalFilters.build(section_types=["gap_evidence"]),
+            ) if retrieval_queries else []
 
         chosen = [DETECTOR_ALIASES[d] for d in (detectors or ALL_DETECTORS) if d in DETECTOR_ALIASES]
         chosen = list(dict.fromkeys(chosen)) or list(ALL_DETECTORS)
@@ -121,6 +136,11 @@ class GapDetectionService:
                 await self._reword(c)
 
         ranked = rank(candidates)
+        reranked_results = self._context.get("reranked_query_results", [])
+        reranking = (
+            (reranked_results[0].metadata or {}).get("reranking", {})
+            if reranked_results else {"status": "no_candidates", "candidates_scored": 0}
+        )
         stats = {
             "candidates_per_detector": per_detector,
             "candidates_after_fusion": len(ranked),
@@ -135,6 +155,8 @@ class GapDetectionService:
             "trend_anchor": staleness.get("anchor"),
             "corpus_span_years": staleness.get("corpus_span"),
             "concepts_with_external_trend": sum(1 for v in staleness["by_concept"].values() if v.get("tau_external") is not None),
+            "reranked_context_candidates": len(reranked_results),
+            "reranking": reranking,
         }
         topic_summary = [
             {"id": t["id"], "label": t["label"], "papers": len(t["papers"]), "chunks": t["size"],
@@ -241,6 +263,18 @@ class GapDetectionService:
         statement_vec = _norm(self._embedder.embed_batch([c["gap_statement"]])[0])
         best = max((_cos(statement_vec, v) for v in self._evidence_vectors(c)), default=0.0)
         attempts = 0
+        known_evidence = {p["chunk_id"] for p in c["evidence_passages"]}
+        for result in self._context.get("reranked_query_results", []):
+            if result.chunk_id in known_evidence:
+                continue
+            vec = self._corpus.get_embedding(result.chunk_id)
+            similarity = _cos(statement_vec, _norm(vec)) if vec else 0.0
+            if similarity >= GROUNDING_THRESHOLD:
+                c["evidence_passages"].append(
+                    self._passage(result.chunk_id, "reranked query context")
+                )
+                known_evidence.add(result.chunk_id)
+                best = max(best, similarity)
         if best < GROUNDING_THRESHOLD and self._retrieval is not None:
             from app.retrieval.filters import RetrievalFilters
 

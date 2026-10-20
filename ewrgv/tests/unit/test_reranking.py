@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from app.core.config import settings
-from app.core.exceptions import RetrievalError
+from app.core.exceptions import ServiceUnavailableError
 from app.domain.models.retrieval_result import RetrievalResult
 from app.retrieval.reranking import CrossEncoderReranker, RerankerError
 from app.retrieval.service import RetrievalService, _cap_per_paper
@@ -119,7 +119,16 @@ def test_service_can_fail_closed(monkeypatch) -> None:
     service = RetrievalService(make_sample_corpus(), reranker=reranker)
     monkeypatch.setattr(service, "_ranked", lambda *args: [_result("a", 1.0, 1)])
 
-    with pytest.raises(RetrievalError, match="RERANK_FAIL_OPEN"):
+    with pytest.raises(ServiceUnavailableError, match="reranking is required but unavailable"):
+        service.retrieve("question", top_k=1, method="sparse")
+
+
+def test_api_service_requires_reranker_even_if_feature_was_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "RERANK_ENABLED", False)
+    service = RetrievalService(make_sample_corpus(), require_reranking=True)
+    monkeypatch.setattr(service, "_ranked", lambda *args: [_result("a", 1.0, 1)])
+
+    with pytest.raises(ServiceUnavailableError, match="RERANK_ENABLED is false"):
         service.retrieve("question", top_k=1, method="sparse")
 
 

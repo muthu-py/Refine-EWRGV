@@ -10,7 +10,12 @@
 | `CandidateEvidenceScorer` (`app/gap_detection/evidence_scoring.py`) | ✅ Implemented, opt-in (Stage 6b): pre-validation evidence-weighted score — **not** validation (see [Evidence-weighted candidate scoring](#evidence-weighted-candidate-scoring)) |
 | Pipeline Stage 3 — run corpus (`app/ingestion/corpus/run_corpus.py`) | ✅ Full-text PaperChunks from `/chunks` (`chunks.json`), with stored embeddings and the BM25 index from `/represent` |
 | Pipeline Stages 4, 6, 7 (`app/orchestration/research_pipeline.py`) | ✅ Wired (Stage 4 retrieves from the run corpus; BM25 by default, hybrid with an injected factory) |
-| `POST /api/v1/research/gaps` | 🔲 Unchanged placeholder (see [API exposure](#api-exposure)) |
+| `POST /api/v1/research/gaps` | ✅ Implemented as a separate signal-based API workflow; see [Knowledge Graph & Gap Detection API](gaps_kg_api.md) |
+
+> **Scope:** This document also describes the injectable `ResearchPipeline`
+> and its LLM-backed `GapDetector`. That legacy/general-purpose pipeline is
+> distinct from the production `/research/gaps` job, which uses the KG signal
+> detectors, rejects LLM options, and requires reranked retrieval evidence.
 
 > **Corpus.** Gap detection runs on the run's `RunCorpus`: the section-aware,
 > page-located `PaperChunk`s written by /acquire → /parse → /sections →
@@ -66,7 +71,10 @@ Stage 7  CandidateRanker.rank(candidates, top_k=TOP_K_GAPS)
 Top-K CandidateGap[]  → (Stage 8 EWRGV validation — not implemented)
 ```
 
-Stage 5 (reranking) is skipped; the reranker is still a stub.
+Stage 5 (reranking) is skipped in this particular `ResearchPipeline` flow; the
+separate API retrieval service has a CrossEncoder reranker. The `/research/gaps`
+API uses that reranker for bounded query/expansion context before its signal
+detectors run. See [retrieval API docs](retrieval_api.md).
 
 ---
 
@@ -362,25 +370,13 @@ works; with a corpus, both are resolved to the corpus's PaperChunks.
 
 ## API exposure
 
-`POST /api/v1/research/gaps` (`GapsRequest{job_id}` → `GapsResponse{job_id,
-status, candidate_gaps: list[dict]}`) is intentionally unchanged. To serve real
-results with that contract, the following is still needed:
-
-1. **A pipeline factory / dependency** that builds `ResearchPipeline` from
-   settings (LLM provider, retriever, detector, ranker), like
-   `_get_qu_service()` does for Phase 2.1.
-2. **Per-job result storage.** `job_id` must resolve to a stored
-   `PipelineResult` (or its gaps). Today `JobStore` only tracks acquisition
-   jobs, and `/query` does not run the pipeline or persist anything. A decision
-   is needed on whether `/query` (or a new background job) runs Stages 1–7 and
-   stores the result, and where (in-memory `JobStore` vs Supabase).
-3. **A mapping** from `CandidateGap` to the `candidate_gaps` dicts (e.g.
-   `gap.model_dump(mode="json")`), keeping domain models out of route code.
-4. **Stable chunk IDs.** `PaperChunk.chunk_id` is a random UUID per chunking
-   run, so re-running /chunks changes the IDs that stored gaps cite (the BM25
-   index is rebuilt automatically when this happens, but stored gaps would
-   not be).  Deterministic IDs (e.g. paper_id + section_id + chunk_index)
-   are needed before gaps are persisted.
+`POST /api/v1/research/gaps` is an implemented KG signal workflow and is not
+the `ResearchPipeline` described above. It persists results through the KG
+repository and reports job state through `/gaps/status/{job_id}`. Its request
+and failure contract, including fixed-false LLM flags and reranker requirement,
+is documented in [gaps_kg_api.md](gaps_kg_api.md). The process-local job-state
+limitation and chunk-ID stability considerations remain relevant operational
+constraints.
 
 ---
 

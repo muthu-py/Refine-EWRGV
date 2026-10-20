@@ -101,6 +101,7 @@ Applied to every endpoint:
 | 422    | Missing `run_id` or `query` |
 | 429    | Embedding API rate limit (API providers only); `Retry-After` header set |
 | 502    | Embedding API rejected the key or the request (API providers only) |
+| 503    | Required CrossEncoder reranking is disabled or model loading/inference failed |
 
 ---
 
@@ -196,13 +197,16 @@ The `/query` endpoint returns `expanded_queries`; post each one to
 `/retrieve/*` with the same `run_id` to retrieve for them as well.
 ResearchPipeline Stage 4 does this automatically.
 
-### Optional cross-encoder reranking
+### Cross-encoder reranking
 
-Set `RERANK_ENABLED=true` to rerank leading candidates with the local
-SentenceTransformers CrossEncoder (default model:
+Reranking is enabled by default (`RERANK_ENABLED=true`) and is required by the
+public `/research/retrieve/*` API endpoints. Those routes fail with HTTP 503 if
+reranking is disabled or the reranker cannot load/score; they never silently
+return the unreranked ordering. It reranks leading
+candidates with the local SentenceTransformers CrossEncoder (default model:
 `cross-encoder/ms-marco-MiniLM-L-6-v2`). Install the optional dependency with
-`pip install -e ".[sentence-transformers]"`. The app starts without importing
-the optional library or loading weights; the model loads on the first
+`pip install -e .` or `pip install -r requirements.txt`. The app starts without
+loading model weights; the model loads on the first
 non-empty reranking request and is reused.
 
 `RERANK_MAX_CANDIDATES` bounds the candidate pool passed to the reranker, and `RERANK_TOP_N` bounds
@@ -215,7 +219,7 @@ dense, sparse, or fused retrieval score; raw model logits appear in
 scores each fused passage once against its highest-ranked matching query.
 
 Configure the model/device/batch with `RERANK_MODEL`, `RERANK_DEVICE` (CPU by
-default), and `RERANK_BATCH_SIZE`. When `RERANK_FAIL_OPEN=true` (default), a
-load or inference failure preserves retrieval order and marks the metadata as
-`failed_fallback`; setting it to `false` returns a retrieval error. Diagnostics
-do not include query or passage text.
+default), and `RERANK_BATCH_SIZE`. `RERANK_FAIL_OPEN` defaults to `false`.
+Internal callers may opt into fallback by setting it to `true`, but API
+retrieval and validation require reranking and remain fail-closed regardless of
+that setting. Diagnostics do not include query or passage text.

@@ -24,7 +24,12 @@ import asyncio
 from typing import Optional
 
 from app.core.config import settings
-from app.core.exceptions import BadRequestError, EmbeddingAPIError, RetrievalError
+from app.core.exceptions import (
+    BadRequestError,
+    EmbeddingAPIError,
+    RetrievalError,
+    ServiceUnavailableError,
+)
 from app.core.logging import get_logger
 from app.domain.interfaces import CorpusStore, EmbeddingProvider
 from app.domain.models.retrieval_result import RetrievalResult
@@ -83,6 +88,7 @@ class RetrievalService:
         corpus_store: CorpusStore,
         embedding_provider: Optional[EmbeddingProvider] = None,
         reranker: Optional[CrossEncoderReranker] = None,
+        require_reranking: bool = False,
     ) -> None:
         self._corpus = corpus_store
         self._embedder = embedding_provider
@@ -90,6 +96,7 @@ class RetrievalService:
         self._dense: Optional[DenseRetriever] = None
         self._hybrid: Optional[HybridRetriever] = None
         self._reranker = reranker
+        self._require_reranking = require_reranking
         if embedding_provider is not None:
             self._use_embedder(embedding_provider)
 
@@ -195,7 +202,7 @@ class RetrievalService:
             cid: min(matched[cid], key=lambda q: matched[cid][q])
             for cid in order
         }
-        if settings.RERANK_ENABLED and results:
+        if (settings.RERANK_ENABLED or self._require_reranking) and results:
             results = await asyncio.to_thread(
                 self._rerank_results, results, best_query
             )
@@ -227,14 +234,26 @@ class RetrievalService:
         return _cap_per_paper(results, top_k, settings.RETRIEVAL_MAX_PER_PAPER)
 
     async def _arerank(self, results: list[RetrievalResult], query: str) -> list[RetrievalResult]:
-        if not settings.RERANK_ENABLED or not results:
+        if not results:
+            return results
+        if not settings.RERANK_ENABLED:
+            if self._require_reranking:
+                raise ServiceUnavailableError(
+                    "Cross-encoder reranking is required for this API but RERANK_ENABLED is false."
+                )
             return results
         return await asyncio.to_thread(self._rerank_results, results, query)
 
     def _rerank_results(
         self, results: list[RetrievalResult], query: str | dict[str, str]
     ) -> list[RetrievalResult]:
-        if not settings.RERANK_ENABLED or not results:
+        if not results:
+            return results
+        if not settings.RERANK_ENABLED:
+            if self._require_reranking:
+                raise ServiceUnavailableError(
+                    "Cross-encoder reranking is required for this API but RERANK_ENABLED is false."
+                )
             return results
         reranker = self._reranker or get_cross_encoder_reranker(
             settings.RERANK_MODEL, settings.RERANK_DEVICE, settings.RERANK_BATCH_SIZE
@@ -258,9 +277,10 @@ class RetrievalService:
             }
             logger.info("Cross-encoder reranking applied", extra=status)
         except Exception as exc:
-            if not settings.RERANK_FAIL_OPEN:
-                raise RetrievalError(
-                    f"Reranking failed ({type(exc).__name__}) and RERANK_FAIL_OPEN is disabled"
+            if self._require_reranking or not settings.RERANK_FAIL_OPEN:
+                raise ServiceUnavailableError(
+                    "Cross-encoder reranking is required but unavailable "
+                    f"({type(exc).__name__}); install the configured model dependency and retry."
                 ) from exc
             logger.warning(
                 "Cross-encoder reranking failed; preserving retrieval order",

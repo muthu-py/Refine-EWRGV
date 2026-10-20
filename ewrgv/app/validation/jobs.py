@@ -51,7 +51,10 @@ async def run_gap_validation(job: AnalysisJob, store: Any, gap_ids: Optional[lis
         embedder = create_embedding_provider()
         from app.knowledge_graph.jobs import load_corpus
         corpus = await load_corpus(job.run_id, embedder)
-        retrieval = RetrievalService(corpus, embedder) if "corpus" in sources else None
+        retrieval = (
+            RetrievalService(corpus, embedder, require_reranking=True)
+            if "corpus" in sources else None
+        )
         validator = EWRGVValidator(kg, corpus, embedder, retrieval=retrieval, external=external,
                                    sources=sources, per_query=per_query, max_iterations=max_iterations)
         views = []

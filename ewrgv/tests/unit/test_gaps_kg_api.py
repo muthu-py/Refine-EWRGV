@@ -113,12 +113,24 @@ class TestKgEndpoints:
 
 
 class TestGapEndpoints:
-    def test_detect_starts_job_with_options(self, client, env) -> None:
-        r = client.post(f"{BASE}/gaps", json={"run_id": "r1", "detectors": ["explicit"], "llm_wording": True})
+    def test_detect_starts_signal_job_without_llm(self, client, env) -> None:
+        r = client.post(f"{BASE}/gaps", json={"run_id": "r1", "detectors": ["explicit"]})
         assert r.status_code == 202
         s = client.get(f"{BASE}/gaps/status/{r.json()['job_id']}").json()
         assert s["kind"] == "gap_detection" and s["status"] == "COMPLETED"
-        assert env["gaps"]["detectors"] == ["explicit"] and env["gaps"]["llm_wording"] is True
+        assert env["gaps"]["detectors"] == ["explicit"]
+        assert env["gaps"]["llm_wording"] is False
+        assert env["gaps"]["include_llm_baseline"] is False
+
+    @pytest.mark.parametrize("option", ["llm_wording", "include_llm_baseline"])
+    def test_llm_modes_are_rejected(self, client, env, option) -> None:
+        response = client.post(f"{BASE}/gaps", json={"run_id": "r1", option: True})
+        assert response.status_code == 422
+
+    def test_gap_api_requires_reranker_enabled(self, client, env, monkeypatch) -> None:
+        monkeypatch.setattr(settings, "RERANK_ENABLED", False)
+        response = client.post(f"{BASE}/gaps", json={"run_id": "r1"})
+        assert response.status_code == 503
 
     def test_bad_detector_is_422(self, client, env) -> None:
         assert client.post(f"{BASE}/gaps", json={"run_id": "r1", "detectors": ["magic"]}).status_code == 422

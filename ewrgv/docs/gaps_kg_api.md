@@ -8,6 +8,8 @@ a per-run **academic knowledge graph**, multi-signal candidate gap detection, an
   (see [api_test_guide.md](api_test_guide.md)).
 - Candidate gaps become validated, uncertain, or unsupported only after the Phase 4 evidence and coverage checks.
 - **The LLM never decides that a gap exists**, and its self-reported confidence is never part of the score.
+- `POST /gaps` uses the non-LLM signal detectors and reranked corpus evidence. It does not call an LLM; both LLM options are fixed to `false` in the API contract.
+- Reranking is required for this endpoint. If the CrossEncoder is disabled or unavailable, the job fails with an explicit error rather than grounding candidates against unreranked results.
 
 All paths are under `/api/v1/research`.
 
@@ -195,8 +197,8 @@ GET /api/v1/research/kg/{run_id}?view=entities&entity_type=METHOD&limit=10
 | Field | Default | Meaning |
 |---|---|---|
 | `detectors` | both | `explicit` (D1) and/or `combination` (D2) |
-| `llm_wording` | `false` | The LLM rephrases gaps that have ≥ 2 statements. The new wording is kept **only if it passes the grounding gate**; otherwise the original sentence stays and the rejected wording is recorded |
-| `include_llm_baseline` | `false` | Also runs the existing LLM-only detector (`app/gap_detection/detector.py`) on the same corpus, for `view=compare`. This costs one LLM call through `LLM_PROVIDER` / `LLM_MODEL` |
+| `llm_wording` | `false` (only allowed value) | Reserved for compatibility; `true` is rejected with HTTP 422. The public endpoint does not generate LLM wording |
+| `include_llm_baseline` | `false` (only allowed value) | Reserved for compatibility; `true` is rejected with HTTP 422. The public endpoint does not run the LLM-only detector |
 | `rebuild_kg` | `false` | Rebuilds the KG first. A KG is also built automatically when none exists, or when the stored one was built for a different `query_id` |
 
 **Response:** `202`, in the same shape as `/kg/build`. Poll `GET /gaps/status/{job_id}`. On this run the job takes about 11 seconds once the KG exists.
@@ -233,7 +235,7 @@ D2 statements are templates ("X is rarely combined with Y: n papers study X…")
 
 - **Small-corpus factor.** `min(1, N/50)` discounts sparsity measured in a small corpus. Sparsity alone is not evidence of a gap; external coverage is checked in phase P4.
 - **Ranking** is by `gap_score`, minus 0.05 per already-ranked candidate of the same gap type, capped at 0.10. The result is `rank_score`.
-- **Grounding gate.** For textual statements, the statement must have cosine ≥ 0.60 to a supporting sentence or an evidence chunk. Otherwise the job re-retrieves up to 3 times (hybrid retrieval with the gap-evidence filter); if it is still ungrounded, `status` becomes `"uncertain"`. D2 template statements are grounded *structurally*: both concepts need evidence passages.
+- **Grounding gate.** The job first performs one bounded hybrid retrieval across the query and its expansions, reranks the candidate passages with the CrossEncoder, and uses those passages as textual grounding context. A textual statement must have cosine ≥ 0.60 to a supporting sentence or evidence chunk. If it remains below threshold, the job re-retrieves up to 3 times (hybrid retrieval with the gap-evidence filter); if it is still ungrounded, `status` becomes `"uncertain"`. D2 template statements are grounded *structurally*: both concepts need evidence passages. Job stats include reranked context candidate count and reranking status.
 - **Gap type.** Rules over the concepts and the statement: Population, Dataset, Evaluation, Contradictory Evidence, otherwise Methodological.
 
 ---
@@ -316,7 +318,7 @@ Real output for run `e0b54bcc`, top 1, trimmed:
 | Parameter | Effect |
 |---|---|
 | `view=full` | Complete stored candidates, including `structured_representation` (domain, population, methodology, outcome, key_concepts, synonyms from KG aliases) and `original_statement`, plus `llm_baseline` |
-| `view=compare` | Signal-based top-N side by side with the LLM baseline's top-N. This needs a job run with `include_llm_baseline: true` |
+| `view=compare` | Signal-based top-N side by side with a previously stored LLM baseline, if one exists. The public `/gaps` endpoint cannot create a new baseline because `include_llm_baseline: true` is rejected |
 | `top=N` | Number of cards, 1–200 |
 | `detector=explicit_statements \| combination_sparsity` | Only candidates produced by that detector |
 
