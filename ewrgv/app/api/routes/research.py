@@ -31,7 +31,7 @@ NOT in these route handlers.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Request
@@ -600,6 +600,7 @@ async def list_run_papers(
     q: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    sort_by: Literal["downloaded", "year_desc", "year_asc", "title_asc", "title_desc"] = "downloaded",
 ) -> dict:
     """Return searchable, paginated paper metadata and pipeline states."""
     from fastapi import HTTPException  # noqa: PLC0415
@@ -609,7 +610,7 @@ async def list_run_papers(
     if limit < 1 or limit > 100 or offset < 0:
         raise HTTPException(status_code=400, detail="limit must be 1..100 and offset must be >= 0.")
     papers, total = await PaperRepository(await get_db_pool()).list_run_papers(
-        run_id, limit=limit, offset=offset, search=q,
+        run_id, limit=limit, offset=offset, search=q, sort_by=sort_by,
     )
     return {"run_id": run_id, "total": total, "limit": limit, "offset": offset, "papers": papers}
 

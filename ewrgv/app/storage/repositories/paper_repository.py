@@ -159,29 +159,45 @@ class PaperRepository:
             return [dict(r) for r in rows]
 
     async def list_run_papers(
-        self, run_id: str, limit: int = 50, offset: int = 0, search: str | None = None
+        self, run_id: str, limit: int = 50, offset: int = 0,
+        search: str | None = None, sort_by: str = "downloaded"
     ) -> tuple[list[dict], int]:
         """Return paginated paper metadata and processing state for a run."""
+        order_by = {
+            "downloaded": "download_priority, p.publication_year DESC NULLS LAST, p.title ASC",
+            "year_desc": "p.publication_year DESC NULLS LAST, p.title ASC",
+            "year_asc": "p.publication_year ASC NULLS LAST, p.title ASC",
+            "title_asc": "p.title ASC",
+            "title_desc": "p.title DESC",
+        }.get(sort_by, "download_priority, p.publication_year DESC NULLS LAST, p.title ASC")
         condition = "AND ($4::text IS NULL OR p.title ILIKE '%' || $4 || '%' OR COALESCE(p.doi, '') ILIKE '%' || $4 || '%' OR COALESCE(p.abstract, '') ILIKE '%' || $4 || '%')"
         async with self._pool.acquire() as conn:
             count = await conn.fetchval(
                 """SELECT COUNT(DISTINCT p.paper_id) FROM papers p
                    JOIN paper_sources ps ON ps.paper_id = p.paper_id
-                   WHERE ps.run_id = $1 """ + condition,
-                run_id, limit, offset, search or None,
+                   WHERE ps.run_id = $1
+                     AND ($2::text IS NULL OR p.title ILIKE '%' || $2 || '%'
+                          OR COALESCE(p.doi, '') ILIKE '%' || $2 || '%'
+                          OR COALESCE(p.abstract, '') ILIKE '%' || $2 || '%')""",
+                run_id, search or None,
             )
             rows = await conn.fetch(
-                """SELECT DISTINCT p.paper_id::text AS paper_id, p.title, p.abstract, p.doi,
+                """SELECT DISTINCT p.paper_id::text AS paper_id,
+                          CASE WHEN p.full_text_status = 'DOWNLOADED' THEN 0 ELSE 1 END AS download_priority,
+                          p.title, p.abstract, p.doi,
                           p.publication_year, p.authors, p.full_text_url, p.source_type,
                           p.full_text_status, p.parsing_status, p.section_status,
                           p.chunk_status, p.embedding_status
                    FROM papers p
                    JOIN paper_sources ps ON ps.paper_id = p.paper_id
                    WHERE ps.run_id = $1 """ + condition +
-                " ORDER BY p.publication_year DESC NULLS LAST, p.title ASC LIMIT $2 OFFSET $3",
+                f" ORDER BY {order_by} LIMIT $2 OFFSET $3",
                 run_id, limit, offset, search or None,
             )
-        return [dict(row) for row in rows], int(count or 0)
+        papers = [dict(row) for row in rows]
+        for paper in papers:
+            paper.pop("download_priority", None)
+        return papers, int(count or 0)
 
     async def run_exists(self, run_id: str) -> bool:
         """Returns True if a research_runs row exists for run_id."""
