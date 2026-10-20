@@ -115,6 +115,14 @@ Dispatches `dense`, `sparse` or `hybrid`.  Without an embedding provider,
 and any missing chunk texts with the provider's async API first, so the
 sync retrievers never call the network inside the event loop.
 
+When `RERANK_ENABLED=true`, the service caps the candidate pool and scores the
+leading query/passage pairs with a lazily loaded SentenceTransformers
+CrossEncoder, then applies the per-paper cap and `top_k`. The original retrieval
+score remains in `RetrievalResult.score`; raw reranker logits and reranking
+status are recorded in metadata. The optional dependency is installed with
+`pip install -e ".[sentence-transformers]"`. See `retrieval_api.md` for the
+environment variables and failure policy.
+
 ### 7. Unified Retrieval Result
 
 **File:** `app/domain/models/retrieval_result.py`

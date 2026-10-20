@@ -148,7 +148,13 @@ class Settings(BaseSettings):
     TOP_K: int = 20
     BM25_K: int = 20
     SEMANTIC_K: int = 20
-    RERANK_TOP_N: int = 10
+    RERANK_TOP_N: int = Field(default=50, ge=1, le=500)
+    RERANK_ENABLED: bool = False
+    RERANK_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    RERANK_DEVICE: str = "cpu"
+    RERANK_BATCH_SIZE: int = Field(default=16, ge=1, le=256)
+    RERANK_MAX_CANDIDATES: int = Field(default=50, ge=1, le=500)
+    RERANK_FAIL_OPEN: bool = True
 
     # ------------------------------------------------------------------ #
     # Gap Detection

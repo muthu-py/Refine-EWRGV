@@ -57,6 +57,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from app.core.config import settings
 from app.core.exceptions import (
     EWRGVError,
     GapDetectionError,
@@ -78,6 +79,7 @@ from app.gap_detection.llm_call import redact_secrets
 from app.ingestion.collectors.service import LiteratureCollectionService
 from app.query_understanding.service import QueryUnderstandingService
 from app.retrieval.service import RetrievalService
+from app.retrieval.reranking import CrossEncoderReranker, get_cross_encoder_reranker
 
 CORPUS_SOURCE_RUN = "run_corpus"
 CORPUS_SOURCE_INJECTED = "injected_retriever"
@@ -454,7 +456,54 @@ class ResearchPipeline:
             extra={"query_id": enriched_query.query_id, "chunks": len(chunks)},
         )
 
-        # TODO Stage 5: reranking (self._reranker)
+        # Stage 5: rerank injected retrievers (RetrievalService may already
+        # have reranked its scored results, in which case avoid double scoring).
+        already_reranked = bool(chunks) and all(
+            result.retrieval_provenance.get(chunk.chunk_id, {}).get("reranking", {}).get("status")
+            in {"applied", "failed_fallback"}
+            for chunk in chunks
+        )
+        injected_reranker = callable(getattr(type(self._reranker), "rerank", None))
+        if not already_reranked and (injected_reranker or settings.RERANK_ENABLED):
+            reranker = self._reranker if injected_reranker else get_cross_encoder_reranker(
+                settings.RERANK_MODEL, settings.RERANK_DEVICE, settings.RERANK_BATCH_SIZE
+            )
+            try:
+                if isinstance(reranker, CrossEncoderReranker):
+                    count = min(
+                        len(chunks), settings.RERANK_MAX_CANDIDATES, settings.RERANK_TOP_N
+                    )
+                    scores = reranker.score_pairs(
+                        enriched_query.query, [chunk.text for chunk in chunks[:count]]
+                    )
+                    ranked = sorted(
+                        zip(chunks[:count], scores), key=lambda item: item[1], reverse=True
+                    )
+                    chunks = [chunk for chunk, _ in ranked] + chunks[count:]
+                    for rank, (chunk, score) in enumerate(ranked, start=1):
+                        result.retrieval_provenance.setdefault(chunk.chunk_id, {}).update({
+                            "retrieval_rank": rank,
+                            "reranker_score": score,
+                            "reranking": {"status": "applied", "model": reranker.model_name},
+                        })
+                else:
+                    chunks = reranker.rerank(
+                        enriched_query.query, chunks, top_n=self._retrieval_top_k
+                    )
+            except Exception as exc:
+                if not settings.RERANK_FAIL_OPEN:
+                    result.error = f"Reranking failed: {type(exc).__name__}"
+                    result.stage_reached = PipelineStage.FAILED
+                    return result
+                logger.warning(
+                    "ResearchPipeline: Stage 5 reranking failed; preserving retrieval order",
+                    extra={"error_type": type(exc).__name__},
+                )
+                for chunk in chunks:
+                    result.retrieval_provenance.setdefault(chunk.chunk_id, {})[
+                        "reranking"
+                    ] = {"status": "failed_fallback"}
+        result.retrieved_chunks = chunks
 
         # -------------------------------------------------------------- #
         # Stage 6: Candidate gap detection
@@ -594,6 +643,10 @@ def _to_paper_chunk(
             "retrieval_rank": item.rank,
             "retrieval_method": item.retrieval_method,
         }
+        if item.metadata:
+            for key in ("reranker_score", "reranking"):
+                if key in item.metadata:
+                    provenance[key] = item.metadata[key]
     elif not isinstance(item, PaperChunk):
         raise TypeError(f"Unsupported retrieval result type: {type(item).__name__}")
 

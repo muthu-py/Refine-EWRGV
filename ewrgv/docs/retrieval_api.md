@@ -195,3 +195,27 @@ POST /api/v1/research/retrieve/{method}
 The `/query` endpoint returns `expanded_queries`; post each one to
 `/retrieve/*` with the same `run_id` to retrieve for them as well.
 ResearchPipeline Stage 4 does this automatically.
+
+### Optional cross-encoder reranking
+
+Set `RERANK_ENABLED=true` to rerank leading candidates with the local
+SentenceTransformers CrossEncoder (default model:
+`cross-encoder/ms-marco-MiniLM-L-6-v2`). Install the optional dependency with
+`pip install -e ".[sentence-transformers]"`. The app starts without importing
+the optional library or loading weights; the model loads on the first
+non-empty reranking request and is reused.
+
+`RERANK_MAX_CANDIDATES` bounds the candidate pool passed to the reranker, and `RERANK_TOP_N` bounds
+how many leading passages are scored (both default to 50 so the default
+candidate pool is fully reranked). Candidates beyond either bound retain their
+retrieval order. The API response shape is unchanged: `score` remains the
+dense, sparse, or fused retrieval score; raw model logits appear in
+`metadata.reranker_score`, original position in `metadata.retrieval_rank`, and
+`metadata.reranking` reports applied or fallback status. Multi-query retrieval
+scores each fused passage once against its highest-ranked matching query.
+
+Configure the model/device/batch with `RERANK_MODEL`, `RERANK_DEVICE` (CPU by
+default), and `RERANK_BATCH_SIZE`. When `RERANK_FAIL_OPEN=true` (default), a
+load or inference failure preserves retrieval order and marks the metadata as
+`failed_fallback`; setting it to `false` returns a retrieval error. Diagnostics
+do not include query or passage text.

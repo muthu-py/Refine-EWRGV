@@ -20,6 +20,7 @@ loop.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from app.core.config import settings
@@ -31,6 +32,7 @@ from app.retrieval.bm25 import SparseRetriever
 from app.retrieval.filters import RetrievalFilters
 from app.retrieval.fusion import HybridRetriever
 from app.retrieval.semantic import DenseRetriever
+from app.retrieval.reranking import CrossEncoderReranker, get_cross_encoder_reranker
 
 logger = get_logger(__name__)
 
@@ -80,12 +82,14 @@ class RetrievalService:
         self,
         corpus_store: CorpusStore,
         embedding_provider: Optional[EmbeddingProvider] = None,
+        reranker: Optional[CrossEncoderReranker] = None,
     ) -> None:
         self._corpus = corpus_store
         self._embedder = embedding_provider
         self._sparse = SparseRetriever(corpus_store=corpus_store)
         self._dense: Optional[DenseRetriever] = None
         self._hybrid: Optional[HybridRetriever] = None
+        self._reranker = reranker
         if embedding_provider is not None:
             self._use_embedder(embedding_provider)
 
@@ -136,7 +140,9 @@ class RetrievalService:
         """Async variant of ``retrieve`` for use inside an event loop."""
         if method in ("dense", "hybrid"):
             await self._prepare_dense([query])
-        return self.retrieve(query, top_k, method, filters)
+        results = self._ranked(query, top_k, method, filters)
+        results = await self._arerank(results, query)
+        return _cap_per_paper(results, top_k, settings.RETRIEVAL_MAX_PER_PAPER)
 
     async def aretrieve_many(
         self,
@@ -174,6 +180,7 @@ class RetrievalService:
         results = [
             best[cid].model_copy(update={
                 "score": fused[cid],
+                "rank": rank,
                 "retrieval_method": f"multi_{method}",
                 "metadata": {
                     **(best[cid].metadata or {}),
@@ -181,8 +188,17 @@ class RetrievalService:
                     "query_ranks": matched[cid],
                 },
             })
-            for cid in order
+            for rank, cid in enumerate(order, start=1)
         ]
+        # Score each fused passage once against its strongest matching query.
+        best_query = {
+            cid: min(matched[cid], key=lambda q: matched[cid][q])
+            for cid in order
+        }
+        if settings.RERANK_ENABLED and results:
+            results = await asyncio.to_thread(
+                self._rerank_results, results, best_query
+            )
         return _cap_per_paper(results, top_k, settings.RETRIEVAL_MAX_PER_PAPER)
 
     def retrieve(
@@ -207,7 +223,67 @@ class RetrievalService:
         boilerplate; pass ``NO_FILTERS`` to search every chunk.
         """
         results = self._ranked(query, top_k, method, filters)
+        results = self._rerank_results(results, query)
         return _cap_per_paper(results, top_k, settings.RETRIEVAL_MAX_PER_PAPER)
+
+    async def _arerank(self, results: list[RetrievalResult], query: str) -> list[RetrievalResult]:
+        if not settings.RERANK_ENABLED or not results:
+            return results
+        return await asyncio.to_thread(self._rerank_results, results, query)
+
+    def _rerank_results(
+        self, results: list[RetrievalResult], query: str | dict[str, str]
+    ) -> list[RetrievalResult]:
+        if not settings.RERANK_ENABLED or not results:
+            return results
+        reranker = self._reranker or get_cross_encoder_reranker(
+            settings.RERANK_MODEL, settings.RERANK_DEVICE, settings.RERANK_BATCH_SIZE
+        )
+        max_candidates = max(1, settings.RERANK_MAX_CANDIDATES)
+        candidates = results[:max_candidates]
+        try:
+            top_n = min(settings.RERANK_TOP_N, len(candidates))
+            if isinstance(query, dict):
+                ranked, elapsed_ms = reranker.rerank_results_by_query(
+                    candidates, query, top_n
+                )
+            else:
+                ranked, elapsed_ms = reranker.rerank_results(query, candidates, top_n)
+            ranked.extend(results[max_candidates:])
+            status = {
+                "status": "applied",
+                "model": reranker.model_name,
+                "candidates_scored": top_n,
+                "inference_ms": round(elapsed_ms, 2),
+            }
+            logger.info("Cross-encoder reranking applied", extra=status)
+        except Exception as exc:
+            if not settings.RERANK_FAIL_OPEN:
+                raise RetrievalError(
+                    f"Reranking failed ({type(exc).__name__}) and RERANK_FAIL_OPEN is disabled"
+                ) from exc
+            logger.warning(
+                "Cross-encoder reranking failed; preserving retrieval order",
+                extra={"error_type": type(exc).__name__, "model": settings.RERANK_MODEL},
+            )
+            status = {
+                "status": "failed_fallback",
+                "model": settings.RERANK_MODEL,
+                "candidates_scored": 0,
+                "error_type": type(exc).__name__,
+            }
+            ranked = results
+        return [
+            result.model_copy(update={
+                "rank": rank,
+                "metadata": {
+                    **(result.metadata or {}),
+                    "retrieval_rank": (result.metadata or {}).get("retrieval_rank", result.rank),
+                    "reranking": dict(status),
+                },
+            })
+            for rank, result in enumerate(ranked, start=1)
+        ]
 
     def _ranked(
         self,
@@ -280,5 +356,11 @@ def _cap_per_paper(results: list[RetrievalResult], top_k: int, cap: int) -> list
                 break
         if len(picked) < top_k:
             picked += skipped[: top_k - len(picked)]
-            picked.sort(key=lambda r: r.score, reverse=True)
+            if any(
+                (r.metadata or {}).get("reranking", {}).get("status") == "applied"
+                for r in results
+            ):
+                picked.sort(key=lambda r: r.rank)
+            else:
+                picked.sort(key=lambda r: r.score, reverse=True)
     return [r.model_copy(update={"rank": i}) for i, r in enumerate(picked, start=1)]
