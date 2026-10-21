@@ -138,15 +138,38 @@ function newInvestigation() {
   `;
 }
 function pipeline() {
-  const completed = 2 + stages.filter(s => state.pipeline[s]?.status === "COMPLETED").length;
+  const workflow = state.fullWorkflow;
+  const workflowActive = workflow?.status === "RUNNING";
+  const phaseStatus = (phase, stage) => {
+    const pipelineStatus = stage ? state.pipeline[stage]?.status : null;
+    return pipelineStatus || workflow?.phases?.[phase] || (state.runId && ["query", "collect"].includes(phase) ? "COMPLETED" : "NOT_STARTED");
+  };
+  const completed = pipelineSequence.filter(step => {
+    if (step === "query" || step === "collect") return workflow?.phases?.[step] === "COMPLETED" || Boolean(state.runId && !workflowActive);
+    return state.pipeline[step]?.status === "COMPLETED" || workflow?.phases?.[step] === "COMPLETED";
+  }).length;
   const percent = Math.round(completed / pipelineSequence.length * 100);
   const gapOptionsPanel = `<section class="card gap-options"><div class="card-body"><div class="gap-options-heading"><b>LLM assistance for gap detection</b><small>Both options are off by default. LLM results remain candidate hypotheses and still need EWRGV validation.</small></div><label><input id="llm-wording" type="checkbox" ${state.gapOptions.llmWording ? "checked" : ""}> Refine signal-based gap wording</label><small>Rephrase existing signal candidates using their cited passages; keep the original wording and scores.</small><label><input id="llm-candidates" type="checkbox" ${state.gapOptions.llmCandidates ? "checked" : ""}> Add LLM-proposed candidates</label><small>Generate additional proposals from reranked corpus passages and include their cited evidence in Candidate Gaps.</small><p>Requires a configured LLM API key. Candidates without valid corpus citations are discarded.</p></div></section>`;
-  return `${heading("RUN PIPELINE", "Move the evidence forward.", "Follow the complete sequence from query understanding and literature collection through processing, candidate identification, and validation. Stages are gated by their prerequisites.", state.runId ? `<button class="button green" data-action="run-pipeline" ${state.busy ? "disabled" : ""}>${state.busy ? "Pipeline running…" : "▶ Run remaining stages"}</button>` : "")}${requireRun()}${state.runId ? `<div class="pipeline-summary"><div><span class="eyebrow">PIPELINE PROGRESS</span><h3>${completed} of ${pipelineSequence.length} complete</h3></div><div class="progress-wrap"><div class="progress"><i style="width:${percent}%"></i></div><small>${percent}%</small></div></div>${gapOptionsPanel}<div class="stage-list">${pipelineSequence.map((step, i) => {
+  const action = state.runId ? `<button class="button green" data-action="run-pipeline" ${state.busy ? "disabled" : ""}>${state.busy ? "Pipeline running…" : "▶ Run remaining stages"}</button>` : "";
+  const intro = heading("RUN PIPELINE", "Move the evidence forward.", "Follow the complete sequence from query understanding and literature collection through processing, candidate identification, and validation. Stages are gated by their prerequisites.", action);
+  const workflowSummary = workflow && (workflowActive || !state.runId)
+    ? `<div class="pipeline-summary"><div><span class="eyebrow">INVESTIGATION PROGRESS</span><h3>${workflow.status === "FAILED" ? "Investigation stopped" : workflow.status === "COMPLETED" ? "Investigation complete" : `Step: ${sequenceNames[workflow.current] || "Investigation"}`}</h3>${workflow.runId ? `<small>Run ${esc(workflow.runId)} · ${esc(workflow.paperCount ?? 0)} papers collected</small>` : ""}</div><div class="progress-wrap"><div class="progress"><i style="width:${percent}%"></i></div><small>${percent}%</small></div></div>` : "";
+  if (!state.runId) {
+    if (!workflow) return `${intro}${requireRun()}`;
+    const earlyStages = ["query", "collect"].map((step, i) => {
+      const status = phaseStatus(step);
+      const detail = step === workflow.current ? workflow.error || "In progress…" : status === "COMPLETED" ? "Completed." : "Waiting to start.";
+      return `<article class="stage-card ${status.toLowerCase()}"><span class="stage-number">${String(i + 1).padStart(2, "0")}</span><div class="stage-copy"><b>${sequenceNames[step]}</b><small>${esc(detail)}</small></div>${badge(status.replaceAll("_", " "))}</article>`;
+    }).join("");
+    return `${intro}${workflowSummary}<div class="stage-list">${earlyStages}</div>`;
+  }
+  const runStages = `<div class="pipeline-summary"><div><span class="eyebrow">PIPELINE PROGRESS</span><h3>${completed} of ${pipelineSequence.length} complete</h3></div><div class="progress-wrap"><div class="progress"><i style="width:${percent}%"></i></div><small>${percent}%</small></div></div>${gapOptionsPanel}<div class="stage-list">${pipelineSequence.map((step, i) => {
     if (step === "query" || step === "collect") {
       const details = step === "query"
         ? (state.question ? `Question: ${state.question}` : "Research question is attached to this run.")
         : `Run ${state.runId.slice(0, 8)}… exists; its collected literature is the input to acquisition.`;
-      return `<article class="stage-card completed pipeline-context-step"><span class="stage-number">${String(i + 1).padStart(2, "0")}</span><div class="stage-copy"><b>${sequenceNames[step]}</b><small>${esc(details)}</small></div>${badge("COMPLETED")}</article>`;
+      const status = phaseStatus(step, step === "query" ? null : "collect");
+      return `<article class="stage-card ${status.toLowerCase()} pipeline-context-step"><span class="stage-number">${String(i + 1).padStart(2, "0")}</span><div class="stage-copy"><b>${sequenceNames[step]}</b><small>${esc(details)}</small></div>${badge(status.replaceAll("_", " "))}</article>`;
     }
     const s = step;
     const result = state.pipeline[s] || {};
@@ -156,7 +179,8 @@ function pipeline() {
     const gateHint = missing.length ? `Complete first: ${missing.map(required => sequenceNames[required]).join(", ")}.` : stageHint(s);
     const disabled = state.busy || missing.length > 0;
     return `<article class="stage-card ${status.toLowerCase()} ${missing.length ? "stage-blocked" : ""}"><span class="stage-number">${String(i + 1).padStart(2, "0")}</span><div class="stage-copy"><b>${stageNames[s]}</b><small>${esc(result.message || gateHint)}</small>${result.job_id ? `<small class="job-id">Job ${esc(result.job_id)}</small>` : ""}</div>${badge(status.replaceAll("_", " "))}<div class="stage-actions">${result.job_id ? `<button class="button subtle small" data-action="check-job-status" data-stage="${s}" ${state.busy ? "disabled" : ""}>Check status</button>` : ""}<button class="button outline small" data-action="run-stage" data-stage="${s}" ${disabled ? "disabled" : ""}>${status === "COMPLETED" ? "Run again" : "Run"}</button></div>${responseDetails("Job start response (POST)", result.startResponse, false, `${s}:start`)}${responseDetails("Latest job status response (GET)", result.statusResponse, result.showStatusResponse, `${s}:status`)}${responseDetails("Job result response (GET)", result.resultResponse, false, `${s}:result`)}</article>`;
-  }).join("")}</div><div class="pipeline-log" id="pipeline-log">${state.busy ? `<span class="pulse"></span> ${esc(state.pipeline.currentMessage || "Working…")}` : ""}</div>` : ""}`;
+  }).join("")}</div><div class="pipeline-log" id="pipeline-log">${state.busy ? `<span class="pulse"></span> ${esc(state.pipeline.currentMessage || "Working…")}` : ""}</div>`;
+  return `${intro}${workflowSummary}${runStages}`;
 }
 function stageHint(s) { return ({ acquire: "Download available full text for papers in this run.", parse: "Extract text from acquired PDFs.", sections: "Classify document sections such as methods and results.", chunks: "Create retrieval-sized text chunks.", represent: "Create vector representations for semantic search.", kg: "Extract entities and relationships into the knowledge graph.", gaps: "Identify gaps with signal detectors and reranked evidence; optionally add LLM-proposed candidates or refine signal-based wording.", validate: "Check candidate gaps against literature sources." })[s]; }
 function invalidateDownstreamStages(stage) {
@@ -603,3 +627,4 @@ async function refreshHealth() { try { const response = await fetch("/api/v1/hea
 window.addEventListener("hashchange", render);
 await refreshHealth();
 await render();
+
