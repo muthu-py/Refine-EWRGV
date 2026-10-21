@@ -26,26 +26,42 @@ Each candidate gap is validated through multi-dimensional evidence search, class
 
 ## Current Status
 
-> **Architecture Phase — v0.1.0**
+> **Research MVP — v0.1.0**
 
-This repository contains the **initial project architecture and development foundation**.
-
-The pipeline skeleton is in place; core implementations are not yet started.
+The repository contains working API paths for literature collection and processing,
+dense/sparse/hybrid retrieval, knowledge-graph construction, signal-based gap
+identification, and evidence-weighted validation. These stages are started
+individually and tracked as background jobs; the API does not yet provide a
+durable, restart-safe end-to-end run coordinator.
 
 | Component | Status |
 |---|---|
 | Domain models | ✅ Complete |
 | Interfaces / Protocols | ✅ Complete |
-| Orchestration skeleton | ✅ Complete |
-| EWRGV validation skeleton | ✅ Complete |
-| API skeleton (`/health` working) | ✅ Complete |
+| Orchestration | 🟡 Separate stage jobs; no durable run coordinator |
+| EWRGV validation | 🟡 Implemented; depends on corpus and external sources |
+| Retrieval API | ✅ Dense, sparse, hybrid, and multi-query endpoints |
+| Cross-encoder reranking | ✅ Enabled by default for retrieval APIs |
+| Candidate gap identification | ✅ Signal detectors by default; optional grounded LLM proposals and LLM wording |
+| API | ✅ Health, research, knowledge-graph, gap, and validation routes |
 | Config & logging | ✅ Complete |
-| Gap detection implementation | 🔲 Not started |
-| Retrieval implementation | 🔲 Not started |
-| EWRGV confidence formula | 🔲 Not started |
-| LLM / embedding providers | 🔲 Not started |
-| Literature collectors | 🔲 Not started |
-| Frontend | 🔲 Not started |
+| LLM / embedding providers | 🟡 Configurable; query understanding and embeddings may use providers |
+| Literature collectors | ✅ Semantic Scholar and OpenAlex |
+| Frontend | 🟡 API-served interface |
+
+`POST /api/v1/research/gaps` uses explicit-statement, combination-sparsity,
+temporal-staleness, and topic-density signals by default. Optional request
+flags can add LLM-proposed candidates grounded in reranked corpus passages and
+use an LLM to refine signal-candidate wording. Both options are off by default;
+candidate source is retained in the response, and every candidate still needs
+EWRGV validation. Cross-encoder retrieval supplies ranked passages for grounding.
+
+Reranking uses `cross-encoder/ms-marco-MiniLM-L-6-v2` by default and lazily
+loads it on the first non-empty retrieval request. Install runtime dependencies
+with `pip install -r requirements.txt`. If the model cannot load or score, API
+retrieval fails clearly instead of returning unreranked results. Embedding and
+query-understanding APIs may also use their configured providers; the signal
+detectors remain the default candidate-generation method for `/gaps`.
 
 ---
 
@@ -129,43 +145,15 @@ pytest tests/ -v
 
 ---
 
-## Development Roadmap
+## Development Priorities
 
-### Phase 1 — Architecture Foundation (current)
-- [x] Project structure
-- [x] Domain models
-- [x] Interfaces
-- [x] Pipeline skeleton
-- [x] API skeleton + health endpoint
-- [x] Core tests
-
-### Phase 2 — Retrieval Implementation
-- [ ] Semantic Scholar literature collector
-- [ ] PDF text extraction + chunking
-- [ ] OpenAI embedding provider
-- [ ] FAISS vector store adapter
-- [ ] BM25 retriever
-- [ ] Hybrid retrieval + RRF fusion
-- [ ] Cross-encoder reranker
-
-### Phase 3 — Gap Detection
-- [ ] LLM-based gap detector
-- [ ] Structured gap representation
-- [ ] Candidate ranking
-
-### Phase 4 — EWRGV Validation
-- [ ] Verification query generation
-- [ ] Direct, terminology, method, counter searches
-- [ ] Evidence classification
-- [ ] Coverage analysis
-- [ ] EWRGV confidence formula design + implementation
-- [ ] Classification
-- [ ] Evidence-chain explanation
-
-### Phase 5 — Evaluation & Frontend
-- [ ] Evaluation dataset creation
-- [ ] Benchmark against baseline systems
-- [ ] React frontend (API-first — backend ready)
+- Evaluate retrieval recall and cross-encoder ranking on a fixed, labeled corpus.
+- Measure signal-based candidate quality and grounding, including false positives
+  from incomplete full-text coverage and sparse corpora.
+- Exercise API jobs against a disposable PostgreSQL/Supabase database and verify
+  persisted detection and validation results across restarts.
+- Improve durable job state, stage prerequisites, and resume behavior before
+  relying on unattended multi-worker deployments.
 
 ---
 
@@ -174,10 +162,21 @@ pytest tests/ -v
 | Method | Endpoint | Status |
 |---|---|---|
 | `GET` | `/api/v1/health` | ✅ Working |
-| `POST` | `/api/v1/research/query` | 🔲 Placeholder |
-| `POST` | `/api/v1/research/gaps` | 🔲 Placeholder |
-| `POST` | `/api/v1/research/validate` | 🔲 Placeholder |
-| `GET` | `/api/v1/research/{job_id}` | 🔲 Placeholder |
+| `POST` | `/api/v1/research/query`, `/collect` | ✅ Query and collection |
+| `POST` | `/api/v1/research/retrieve/{dense,sparse,hybrid,multi}` | ✅ Retrieval with required reranking |
+| `POST` | `/api/v1/research/gaps` | ✅ Signal-based, non-LLM candidate detection |
+| `POST` | `/api/v1/research/validate` | ✅ Evidence and coverage validation |
+| `POST` | `/api/v1/research/kg/build` | ✅ Knowledge-graph build |
+| `GET` | `/api/v1/research/*/status/{job_id}` | ✅ Background job status |
+
+See [docs/gaps_kg_api.md](docs/gaps_kg_api.md) and
+[docs/retrieval_api.md](docs/retrieval_api.md) for request requirements,
+configuration, and error behavior.
+
+Run the research APIs in order: `/query` → `/collect` → `/acquire` → `/parse` →
+`/sections` → `/chunks` → `/represent` → `/kg/build` → `/gaps` → `/validate`.
+The analysis routes reject missing persisted prerequisites with `409`; the UI
+Pipeline screen shows and gates this same sequence.
 
 ---
 

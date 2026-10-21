@@ -28,7 +28,8 @@ from typing import Any, Optional, Protocol, runtime_checkable
 from app.domain.enums import EvidenceType, GapClassification
 from app.domain.models.candidate_gap import CandidateGap
 from app.domain.models.evidence import Evidence
-from app.domain.models.paper import DocumentChunk, Paper
+from app.domain.models.paper import Paper
+from app.domain.models.paper_chunk import PaperChunk
 from app.domain.models.query import ResearchQuery
 from app.domain.models.validation import CoverageAssessment, ValidationResult
 
@@ -145,7 +146,7 @@ class DocumentParser(Protocol):
 @runtime_checkable
 class Retriever(Protocol):
     """
-    Interface for retrieving DocumentChunks relevant to a query string.
+    Interface for retrieving PaperChunks relevant to a query string.
 
     Concrete implementations include:
         SemanticRetriever  – dense vector similarity search
@@ -153,7 +154,7 @@ class Retriever(Protocol):
         HybridRetriever    – fusion of the above
     """
 
-    def retrieve(self, query: str, top_k: int = 20) -> list[DocumentChunk]:
+    def retrieve(self, query: str, top_k: int = 20) -> list[PaperChunk]:
         """Return the top-k most relevant chunks for the query."""
         ...
 
@@ -165,9 +166,9 @@ class Reranker(Protocol):
     def rerank(
         self,
         query: str,
-        chunks: list[DocumentChunk],
+        chunks: list[PaperChunk],
         top_n: int = 10,
-    ) -> list[DocumentChunk]:
+    ) -> list[PaperChunk]:
         """
         Return the top-n chunks reranked by relevance to the query.
         """
@@ -191,7 +192,7 @@ class GapDetector(Protocol):
     def detect(
         self,
         query: ResearchQuery,
-        chunks: list[DocumentChunk],
+        chunks: list[PaperChunk],
     ) -> list[CandidateGap]:
         """
         Detect candidate gaps from a set of retrieved evidence chunks.
@@ -218,7 +219,7 @@ class EvidenceClassifier(Protocol):
     def classify(
         self,
         gap: CandidateGap,
-        chunk: DocumentChunk,
+        chunk: PaperChunk,
     ) -> EvidenceType:
         """
         Classify a chunk as SUPPORTING, COUNTER, PARTIAL, etc. relative to a gap.
@@ -296,11 +297,11 @@ class VectorStore(Protocol):
     app/storage/vector/.
     """
 
-    def add(self, chunks: list[DocumentChunk], embeddings: list[list[float]]) -> None:
+    def add(self, chunks: list[PaperChunk], embeddings: list[list[float]]) -> None:
         """Index the given chunks with their embeddings."""
         ...
 
-    def search(self, query_embedding: list[float], top_k: int) -> list[DocumentChunk]:
+    def search(self, query_embedding: list[float], top_k: int) -> list[PaperChunk]:
         """Return the top-k most similar chunks."""
         ...
 
@@ -345,3 +346,41 @@ class EvidenceRepository(ABC):
 
     @abstractmethod
     def delete(self, evidence_id: str) -> None: ...
+
+
+# ======================================================================
+# Corpus Storage Interface (Phase 2.5)
+# ======================================================================
+
+
+@runtime_checkable
+class CorpusStore(Protocol):
+    """
+    Interface for accessing the document corpus (papers and chunks).
+
+    Retrieval modules depend on this interface to access document chunks
+    for scoring and ranking.
+
+    Implementation: RunCorpus (app.ingestion.corpus.run_corpus),
+    built from a run's chunks.json artifacts by RunCorpusLoader.
+    """
+
+    def get_all_chunks(self) -> list[PaperChunk]:
+        """Return all document chunks in the corpus."""
+        ...
+
+    def get_chunks_by_paper_id(self, paper_id: str) -> list[PaperChunk]:
+        """Return all chunks belonging to a specific paper."""
+        ...
+
+    def get_paper_by_id(self, paper_id: str) -> Optional[Paper]:
+        """Return a paper by its ID, or None if not found."""
+        ...
+
+    def get_all_papers(self) -> list[Paper]:
+        """Return all papers in the corpus."""
+        ...
+
+    def get_chunk_by_id(self, chunk_id: str) -> Optional[PaperChunk]:
+        """Return a chunk by its ID, or None if not found."""
+        ...

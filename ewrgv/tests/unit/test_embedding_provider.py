@@ -127,7 +127,7 @@ async def test_non_retryable_error(provider):
         # 400 Bad Request should not be retried
         mock_post.return_value = make_mock_response(400, text="Bad Request")
         
-        with pytest.raises(ProviderError, match="Embedding API error: HTTP 400"):
+        with pytest.raises(ProviderError, match=r"rejected the request \(HTTP 400\): Bad Request"):
             await provider.embed_text("test text")
             
         assert mock_post.call_count == 1

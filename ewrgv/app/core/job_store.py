@@ -192,6 +192,40 @@ class RepresentationJob:
 
 
 
+@dataclass
+class AnalysisJob:
+    """
+    A knowledge-graph build or gap-detection background job.
+
+    ``kind`` is "kg_build" or "gap_detection"; ``progress`` holds the current
+    step name; ``summary`` holds the result counts once completed.
+    """
+    job_id: str
+    run_id: str
+    kind: str
+    status: JobStatus = JobStatus.PENDING
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    progress: str = "queued"
+    summary: dict = field(default_factory=dict)
+    error: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "job_id": self.job_id,
+            "run_id": self.run_id,
+            "kind": self.kind,
+            "status": self.status.value,
+            "progress": self.progress,
+            "created_at": self.created_at.isoformat(),
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "summary": dict(self.summary),
+            "error": self.error,
+        }
+
+
 class JobStore:
     """Thread-safe in-memory store for all EWRGV background pipeline jobs."""
 
@@ -201,6 +235,7 @@ class JobStore:
         self._sectioning_jobs: dict[str, SectioningJob] = {}
         self._chunking_jobs: dict[str, ChunkingJob] = {}
         self._representation_jobs: dict[str, RepresentationJob] = {}
+        self._analysis_jobs: dict[str, AnalysisJob] = {}
         self._lock = asyncio.Lock()
 
     # ---- Phase 2.4: Acquisition jobs (unchanged) ---- #
@@ -295,3 +330,18 @@ class JobStore:
         async with self._lock:
             self._representation_jobs[job.job_id] = job
 
+    # ---- Knowledge graph / gap detection jobs ---- #
+
+    async def create_analysis_job(self, run_id: str, kind: str) -> AnalysisJob:
+        job = AnalysisJob(job_id=str(uuid4()), run_id=run_id, kind=kind)
+        async with self._lock:
+            self._analysis_jobs[job.job_id] = job
+        return job
+
+    async def get_analysis_job(self, job_id: str) -> Optional[AnalysisJob]:
+        async with self._lock:
+            return self._analysis_jobs.get(job_id)
+
+    async def update_analysis_job(self, job: AnalysisJob) -> None:
+        async with self._lock:
+            self._analysis_jobs[job.job_id] = job

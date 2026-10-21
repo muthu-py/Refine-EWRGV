@@ -3,40 +3,17 @@ app/validation/counter_search.py
 ----------------------------------
 Mandatory counter-evidence search.
 
-This is a *required* step in EWRGV.  The system must actively look for
-evidence that challenges or refutes the identified gap.  This prevents
-false positives where a gap appears to exist simply because the initial
-retrieval didn't surface conflicting work.
-
-Status: SKELETON – not implemented.
+The system must actively look for work that already addresses the gap:
+queries are phrased as if the gap were solved ("<concepts> novel framework",
+"<concepts> proposed method improves").  Skipping this step would let a gap
+"exist" only because the initial retrieval never surfaced the work that
+fills it.
 """
 
 from __future__ import annotations
 
-from app.core.logging import get_logger
-from app.domain.models.candidate_gap import CandidateGap
-from app.domain.models.paper import DocumentChunk
-
-logger = get_logger(__name__)
+from app.validation.direct_search import ValidationSearch
 
 
-class CounterEvidenceSearch:
-    """
-    Actively searches for counter-evidence against a CandidateGap.
-
-    This is a *mandatory* step — skipping it would undermine the
-    validity of the EWRGV process.
-
-    Status: SKELETON – not implemented.
-    """
-
-    def __init__(self, retriever: object) -> None:
-        self._retriever = retriever
-
-    def search(self, gap: CandidateGap, queries: list[str]) -> list[DocumentChunk]:
-        """
-        Search specifically for evidence that contradicts the gap claim.
-        NOT YET IMPLEMENTED.
-        """
-        logger.warning("CounterEvidenceSearch.search is not yet implemented.")
-        return []
+class CounterEvidenceSearch(ValidationSearch):
+    search_type = "counter"

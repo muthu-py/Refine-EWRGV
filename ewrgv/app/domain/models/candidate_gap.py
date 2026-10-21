@@ -16,6 +16,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from app.domain.enums import GapType
+from app.domain.models.candidate_evidence import CandidateEvidenceAssessment
 
 
 class StructuredGapRepresentation(BaseModel):
@@ -56,7 +57,11 @@ class CandidateGap(BaseModel):
     source_papers:
         Paper IDs that provided evidence for this gap's identification.
     relevant_passages:
-        Chunk IDs of the specific passages that motivated this gap.
+        Chunk IDs of the specific passages that motivated this gap
+        (supporting evidence).
+    contradicting_passages:
+        Chunk IDs of retrieved passages the detector flagged as suggesting
+        the gap may already be addressed (counter evidence).
     initial_confidence:
         A raw confidence score (0.0–1.0) from the detector *before* EWRGV
         validation runs.  This is deliberately distinct from the post-
@@ -65,6 +70,9 @@ class CandidateGap(BaseModel):
         Rank assigned by the candidate-ranking step (lower = higher priority).
     metadata:
         Free-form detector-level metadata.
+    evidence_assessment:
+        Optional pre-validation evidence-weighted score
+        (CandidateEvidenceScorer).  Not a validation outcome.
     """
 
     gap_id: str = Field(default_factory=lambda: str(uuid4()))
@@ -77,3 +85,5 @@ class CandidateGap(BaseModel):
     initial_confidence: float = 0.0
     rank: Optional[int] = None
     metadata: dict = Field(default_factory=dict)
+    contradicting_passages: list[str] = Field(default_factory=list)
+    evidence_assessment: Optional[CandidateEvidenceAssessment] = None

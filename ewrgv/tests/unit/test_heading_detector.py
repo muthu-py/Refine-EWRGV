@@ -119,3 +119,40 @@ class TestHeadingDetectorMultiPage:
         method = next((c for c in candidates if "Methodology" in c.raw_text), None)
         assert intro is not None and intro.page_number == 1
         assert method is not None and method.page_number == 2
+
+
+class TestHeadingDetectorPdfNoise:
+    """False headings seen on real PDFs (wrapped lines, references, page markers)."""
+
+    REAL = ["1. Introduction", "A. Overview of the Proposed System", "4. Results",
+            "Limitations", "CONCLUSION", "2.1 Dataset Description", "II. RELATED WORK"]
+    NOISE = [
+        "Zhang et al. (2014) proposed an automated",
+        "retinal disease diagnosis system based on image",
+        "27. Radosavovic, I, Kosaraju, R, Girshick, R, He, K, Dollar, P. Designing network",
+        "20 / 21",
+        "ISSN: 2502-4752",
+        "Medical Image Processing, Texture Analysis,",
+        "The proposed Local Binary Pattern (LBP)-based",
+        "Binary Pattern-based retinal image analysis",
+        "also demonstrated strong performance across",
+        "larger clinical datasets to further improve",
+    ]
+
+    @staticmethod
+    def _isolated(texts: list[str]) -> list[tuple[int, int, str]]:
+        """Every line wrapped in blank lines, as in PDFs with a break after each phrase."""
+        out: list[str] = []
+        for t in texts:
+            out += ["", t, ""]
+        out.append("This is a long paragraph line with many words in it to follow headings.")
+        return make_lines(*out)
+
+    def test_noise_rejected_real_headings_kept(self) -> None:
+        found = [h.raw_text for h in detect_headings(self._isolated(self.REAL + self.NOISE))]
+        assert found == self.REAL
+
+    @pytest.mark.parametrize("line", NOISE)
+    def test_each_noise_line_rejected_alone(self, line: str) -> None:
+        lines = make_lines("", line, "", "This is a long paragraph line with many words in it to follow.")
+        assert detect_headings(lines) == []

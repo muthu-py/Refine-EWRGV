@@ -71,6 +71,7 @@ async def run_chunking(
         max_chunk_size=settings.CHUNK_MAX_SIZE,
         overlap_size=settings.CHUNK_OVERLAP,
         min_chunk_size=settings.CHUNK_MIN_SIZE,
+        min_chunk_words=settings.CHUNK_MIN_WORDS,
     )
     chunker = SectionChunker(config=config)
 
@@ -185,6 +186,9 @@ async def run_chunking(
         job.completed_at = datetime.now(timezone.utc)
         await job_store.update_chunking_job(job)
         await storage_client.close()
+        from app.retrieval import corpus_cache  # noqa: PLC0415
+
+        corpus_cache.clear()  # chunk IDs changed: cached corpora are stale
 
     logger.info(
         "Chunking worker complete",

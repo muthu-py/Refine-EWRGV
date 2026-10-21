@@ -55,7 +55,7 @@ class Evidence(BaseModel):
     paper_id:
         The source Paper.
     passage_id:
-        The DocumentChunk (passage) this evidence was extracted from.
+        The PaperChunk (passage) this evidence was extracted from.
     evidence_type:
         Classification assigned after evidence-classification step.
     passage_text:

@@ -1,28 +1,34 @@
 """
 app/evidence/strength.py
 --------------------------
-Evidence strength assessment.
+Evidence strength: how much one classified item weighs, independent of its type.
 
-Determines how strongly a piece of evidence supports or counters a gap claim,
-independent of evidence type classification.
+    strength = relevance x recency x source
 
-Status: SKELETON – placeholder module.
+    recency  1.0  newer than the gap's newest stating paper (fresh work counts fully)
+             0.8  same year or older
+             0.9  year unknown
+    source   1.0  run corpus (full text, already screened for relevance)
+             0.9  external title + abstract
 """
 
 from __future__ import annotations
 
-from app.core.logging import get_logger
+from typing import Optional
+
 from app.domain.models.evidence import Evidence
 
-logger = get_logger(__name__)
+
+def strength_of(relevance: float, year: Optional[int], reference_year: Optional[int], source: str) -> float:
+    if year is None or reference_year is None:
+        recency = 0.9
+    else:
+        recency = 1.0 if year > reference_year else 0.8
+    src = 1.0 if source == "corpus" else 0.9
+    return round(max(0.0, min(1.0, relevance)) * recency * src, 4)
 
 
 def assess_strength(evidence: Evidence) -> float:
-    """
-    Compute a strength score for an evidence item.
-
-    Returns a score in [0.0, 1.0].
-    NOT YET IMPLEMENTED — returns 0.0.
-    """
-    logger.warning("assess_strength is not yet implemented.")
-    return 0.0
+    """Strength of an Evidence item (uses metadata year / reference_year / source)."""
+    meta = evidence.metadata or {}
+    return strength_of(evidence.relevance, meta.get("year"), meta.get("reference_year"), meta.get("source", "external"))

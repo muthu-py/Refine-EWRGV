@@ -1,44 +1,15 @@
 import json
-import re
-from typing import List, Dict, Any, Set
+from typing import Dict, Any, Set
 from asyncpg import Pool
 from collections import defaultdict
 from app.core.logging import get_logger
+# Re-exported for backward compatibility; defined in a DB-independent module.
+from app.ingestion.deduplication.normalization import (  # noqa: F401
+    normalize_doi,
+    normalize_title_authors_year,
+)
 
 logger = get_logger(__name__)
-
-def normalize_doi(doi: str | None) -> str | None:
-    if not doi:
-        return None
-    doi = doi.lower().strip()
-    doi = re.sub(r'^(https?://)?(dx\.)?doi\.org/', '', doi)
-    doi = re.sub(r'^doi:', '', doi)
-    doi = doi.strip()
-    return doi if doi else None
-
-def normalize_title_authors_year(title: str | None, authors: List[dict] | None, year: int | None) -> str | None:
-    if not title or not year:
-        return None
-    
-    # Normalize title
-    t = title.lower()
-    t = re.sub(r'[^\w\s]', ' ', t)
-    t = re.sub(r'\s+', ' ', t).strip()
-    if not t:
-        return None
-    
-    # Normalize authors
-    author_words = []
-    if authors:
-        for a in authors:
-            name = a.get("name", "") if isinstance(a, dict) else ""
-            if name:
-                words = re.findall(r'[a-z]+', name.lower())
-                author_words.extend(words)
-    author_words = sorted(list(set(author_words)))
-    a_str = "_".join(author_words)
-    
-    return f"{t}|{a_str}|{year}"
 
 class Deduplicator:
     def __init__(self, db_pool: Pool):

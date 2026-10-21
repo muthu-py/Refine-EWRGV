@@ -44,6 +44,9 @@ async def run_representation(
             job.status = JobStatus.COMPLETED
             
         await job_store.update_representation_job(job)
+        from app.retrieval import corpus_cache  # noqa: PLC0415
+
+        corpus_cache.clear()  # new vectors / BM25 index: reload on next retrieval
         logger.info(
             "Representation worker finished for job %s. Status: %s. "
             "Embedded: %d/%d chunks.",

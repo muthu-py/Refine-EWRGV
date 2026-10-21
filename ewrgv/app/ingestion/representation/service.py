@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.core.config import settings
-from app.core.exceptions import StorageError
+from app.core.exceptions import EmbeddingAPIError, StorageError
 from app.core.job_store import JobStatus, RepresentationJob
 from app.core.logging import get_logger
 from app.domain.enums import EmbeddingStatus
@@ -68,10 +68,13 @@ class RepresentationService:
         logger.info("Found %d papers for representation (run %s)", len(papers), run_id)
 
         all_run_chunks: list[PaperChunk] = []
+        # Set when the embedding API fails in a way retrying won't fix this run
+        # (bad key, rate limit after retries); remaining batches are skipped.
+        stop_error: Optional[EmbeddingAPIError] = None
 
         # 2. Process each paper for embeddings
         for paper in papers:
-            paper_id = paper["paper_id"]
+            paper_id = str(paper["paper_id"])  # asyncpg returns uuid.UUID; chunk_embeddings.paper_id is TEXT
             try:
                 # 2a. Download chunks.json
                 chunks_path = get_chunks_path(paper_id)
@@ -89,8 +92,18 @@ class RepresentationService:
                 # 2b. Check existing embeddings (Incremental)
                 model_name = self._provider.get_model_name()
                 existing_ids = await self._embedding_repo.get_embedded_chunk_ids(paper_id, model_name)
+
+                # Re-chunking issues new chunk_ids; drop vectors of chunks that no
+                # longer exist so counts and paper status stay accurate.
+                stale_ids = existing_ids - {c.chunk_id for c in paper_chunks}
+                if stale_ids:
+                    await self._embedding_repo.delete_embeddings(sorted(stale_ids), model_name)
+                    existing_ids = existing_ids - stale_ids
+                    logger.info("Paper %s: pruned %d stale embeddings.", paper_id, len(stale_ids))
                 
-                chunks_to_embed = [c for c in paper_chunks if c.chunk_id not in existing_ids]
+                # Empty chunks are skipped: providers reject empty inputs (Gemini: 400).
+                embeddable = [c for c in paper_chunks if c.text and c.text.strip()]
+                chunks_to_embed = [c for c in embeddable if c.chunk_id not in existing_ids]
                 
                 if not chunks_to_embed:
                     logger.debug("Paper %s completely embedded, skipping.", paper_id)
@@ -109,7 +122,11 @@ class RepresentationService:
                 for i in range(0, len(chunks_to_embed), batch_size):
                     batch = chunks_to_embed[i : i + batch_size]
                     texts = [c.text for c in batch]
-                    
+
+                    if stop_error is not None:
+                        job.failed_chunks += len(batch)
+                        continue
+
                     try:
                         embeddings = await self._provider.embed_documents(texts)
                         
@@ -129,13 +146,20 @@ class RepresentationService:
                         await self._embedding_repo.save_embeddings(records)
                         job.embedded_chunks += len(records)
                         
+                    except EmbeddingAPIError as exc:
+                        logger.error("Failed to embed batch for paper %s: %s", paper_id, exc)
+                        job.failed_chunks += len(batch)
+                        job.error = exc.message
+                        if exc.kind in ("auth", "rate_limit"):
+                            stop_error = exc
                     except Exception as exc:
                         logger.error("Failed to embed batch for paper %s: %s", paper_id, exc)
                         job.failed_chunks += len(batch)
+                        job.error = f"Embedding failed: {exc}"
                         # Continue with next batch/paper
 
                 # Determine paper status
-                total_expected = len(paper_chunks)
+                total_expected = len(embeddable)
                 actual_embedded = await self._embedding_repo.get_embedding_counts(paper_id, model_name)
                 
                 if actual_embedded >= total_expected:
@@ -165,7 +189,13 @@ class RepresentationService:
         except Exception as exc:
             logger.error("Failed to build BM25 index for run %s: %s", run_id, exc)
             job.bm25_status = "FAILED"
-            job.error = f"BM25 build failed: {str(exc)}"
+            job.error = "; ".join(filter(None, [job.error, f"BM25 build failed: {str(exc)}"]))
+
+        if stop_error is not None:
+            job.error = (
+                f"{stop_error.message}. Embedding stopped early; re-run /represent "
+                "to embed only the remaining chunks."
+            )
 
         # 4. Finalize job status
         if job.failed_chunks > 0 or job.failed_papers > 0 or job.bm25_status == "FAILED":

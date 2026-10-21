@@ -16,7 +16,8 @@ import pytest
 from app.domain.enums import EvidenceType, GapClassification, GapType, QueryType
 from app.domain.models.candidate_gap import CandidateGap, StructuredGapRepresentation
 from app.domain.models.evidence import Evidence, Provenance
-from app.domain.models.paper import Author, DocumentChunk, Paper
+from app.domain.models.paper import Author, Paper
+from app.domain.models.paper_chunk import PaperChunk
 from app.domain.models.query import ResearchQuery
 from app.domain.models.validation import CoverageAssessment, ValidationResult
 
@@ -48,9 +49,11 @@ class TestPaper:
         assert p.authors[0].name == "Vaswani"
 
 
-class TestDocumentChunk:
+class TestPaperChunk:
     def test_basic(self):
-        chunk = DocumentChunk(paper_id="paper-1", text="Transformers are great.")
+        chunk = PaperChunk(
+            paper_id="paper-1", section_id="s1", section_title="Intro", text="Transformers are great."
+        )
         assert chunk.paper_id == "paper-1"
         assert chunk.chunk_id is not None
 

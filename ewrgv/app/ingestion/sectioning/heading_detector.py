@@ -1,4 +1,4 @@
-﻿"""
+"""
 app/ingestion/sectioning/heading_detector.py
 ---------------------------------------------
 Context-aware, multi-signal heading detection for academic papers.
@@ -99,6 +99,29 @@ _RE_SENTENCE_END = re.compile(r"\w{3,}\s+\w{3,}\s+\w{3,}.*\.$")
 
 # Citation line patterns — e.g. "[1] Smith et al..."
 _RE_CITATION = re.compile(r"^\s*\[\d+\]|\s*\(\d{4}\)$")
+
+# Page markers: "20 / 21", "3 of 12", "Page 4"
+_RE_PAGE_MARKER = re.compile(r"^\s*(?:page\s+)?\d{1,4}\s*(?:/|of)\s*\d{1,4}\s*$|^\s*page\s+\d{1,4}\s*$", re.IGNORECASE)
+
+# Bibliographic / front-matter noise: reference entries, DOIs, URLs, journal metadata
+_RE_BIBLIO = re.compile(
+    r"\bet al\b|\(\s*(?:19|20)\d{2}[a-z]?\s*\)|\bdoi\b|https?://|www\.|\bissn\b|\bisbn\b"
+    r"|\bvol\.|\bpp\.|©|\bcopyright\b|\bpreprint\b|@|\barxiv\b"
+    # Journal page headers: "Volume 8, Issue 2", "IJFMR260270709", "e-ISSN", licences
+    r"|\bvolume\s+\d+|\bissue\s+\d+|^[A-Z]{3,}[-\s]?\d{5,}\b|\blicen[cs]e\b|\bcc[- ]by\b",
+    re.IGNORECASE,
+)
+
+# Reference entry: "27. Radosavovic, I, Kosaraju, R, ..." / "Smith J, Doe A."
+_RE_AUTHOR_LIST = re.compile(r"[A-Z][a-zA-Z'\-]+,\s*[A-Z]{1,2}\b\.?(?:\s*,|\s+[A-Z][a-z])")
+
+# A heading never ends on a connector — such a line is wrapped prose
+_WRAP_END_WORDS = frozenset({
+    "a", "an", "the", "and", "or", "of", "in", "on", "for", "to", "with", "by",
+    "from", "as", "at", "via", "using", "based", "is", "are", "was", "were",
+    "that", "which", "this", "these", "its", "their", "our", "into", "than",
+    "between", "across", "under", "over", "such", "both", "while", "where",
+})
 
 # ALL-CAPS line
 _RE_ALL_CAPS = re.compile(r"^[A-Z][A-Z\s\d:&/-]{2,}$")
@@ -214,6 +237,12 @@ def detect_headings(
     candidates: list[HeadingCandidate] = []
     n = len(lines)
 
+    # When most lines are surrounded by blank lines (PDFs that put a break
+    # after nearly every word or phrase), isolation says nothing about headings.
+    non_empty = [i for i, t in enumerate(lines) if t[2].strip()]
+    isolated = sum(1 for i in non_empty if _prev_is_empty(i, lines) and _next_is_empty(i, lines))
+    isolation_informative = not non_empty or isolated / len(non_empty) < 0.4
+
     for i, (line_idx, page_num, raw) in enumerate(lines):
         stripped = raw.strip()
         if not stripped:
@@ -226,11 +255,14 @@ def detect_headings(
             continue
         if len(stripped) > _MAX_HEADING_LENGTH:
             continue
+        if _RE_PAGE_MARKER.match(stripped):
+            continue
 
         score, signals, level, numbering = _score_line(
             stripped=stripped,
             index=i,
             lines=lines,
+            isolation_informative=isolation_informative,
         )
 
         if score >= min_score:
@@ -256,6 +288,7 @@ def _score_line(
     stripped: str,
     index: int,
     lines: list[tuple[int, int, str]],
+    isolation_informative: bool = True,
 ) -> tuple[float, list[str], int, str]:
     """
     Score a single candidate line.
@@ -283,6 +316,19 @@ def _score_line(
     # --- Signal 3: Sentence guard ---
     if _RE_SENTENCE_END.match(stripped) and len(stripped.split()) > 7:
         return 0.0, ["SENTENCE_GUARD"], 1, ""
+
+    # --- Signal 3b: Prose / bibliography guards (known vocabulary exempt) ---
+    known = _is_known_vocab(lower)
+    if not known:
+        body = _strip_numbering_keep_case(stripped)
+        words = body.split()
+        last = words[-1].lower().strip(".:;") if words else ""
+        if _RE_BIBLIO.search(stripped) or _RE_AUTHOR_LIST.search(stripped):
+            return 0.0, ["BIBLIO_GUARD"], 1, ""
+        if body[:1].islower():
+            return 0.0, ["LOWERCASE_START_GUARD"], 1, ""
+        if stripped.endswith((",", "-", ";")) or last in _WRAP_END_WORDS:
+            return 0.0, ["WRAPPED_LINE_GUARD"], 1, ""
 
     # --- Signal 4: Numbered heading pattern ---
     arabic_m = _RE_ARABIC.match(stripped)
@@ -327,11 +373,14 @@ def _score_line(
         score += 0.5
         signals.append("KNOWN_VOCAB")
     else:
-        # Partial vocabulary match — substring in known headings
-        for known in _KNOWN_HEADINGS:
-            if known in lower and len(known) > 4:
+        # Partial vocabulary match — the heading must START with a known
+        # heading phrase ("Results on X", "Limitations of Y"); a vocabulary
+        # word somewhere inside a line is just prose.
+        body_lower = _strip_numbering(lower)
+        for known_heading in _KNOWN_HEADINGS:
+            if len(known_heading) > 4 and re.match(rf"{re.escape(known_heading)}\b", body_lower):
                 score += 0.25
-                signals.append(f"PARTIAL_VOCAB({known})")
+                signals.append(f"PARTIAL_VOCAB({known_heading})")
                 break
 
     # --- Signal 6: Length heuristic ---
@@ -352,8 +401,8 @@ def _score_line(
         signals.append("TITLE_CASE")
 
     # --- Signal 8: Surrounding whitespace context ---
-    prev_empty = _prev_is_empty(index, lines)
-    next_empty = _next_is_empty(index, lines)
+    prev_empty = isolation_informative and _prev_is_empty(index, lines)
+    next_empty = isolation_informative and _next_is_empty(index, lines)
     if prev_empty and next_empty:
         score += 0.2
         signals.append("ISOLATED_LINE")
@@ -373,6 +422,12 @@ def _score_line(
         score -= 0.35
         signals.append("NUMBERED_LIST_GUARD")
 
+    # --- Signal 11: Un-numbered, non-vocabulary lines need heading-like casing ---
+    if not numbering and not known and not signals_has_vocab(signals):
+        if not (_RE_ALL_CAPS.match(stripped) or _is_title_case(stripped)):
+            score -= 0.3
+            signals.append("PROSE_CASE_GUARD")
+
     return min(score, 1.0), signals, level, numbering
 
 
@@ -381,10 +436,24 @@ def _score_line(
 # ---------------------------------------------------------------------------
 
 
+def signals_has_vocab(signals: list[str]) -> bool:
+    return any(s.startswith("PARTIAL_VOCAB") for s in signals)
+
+
 def _is_known_vocab(lower_text: str) -> bool:
     """Check if the text (stripped of numbering) matches known vocabulary."""
     stripped_lower = _strip_numbering(lower_text)
     return stripped_lower in _KNOWN_HEADINGS
+
+
+def _strip_numbering_keep_case(text: str) -> str:
+    """Remove a leading numbering prefix, preserving the original case."""
+    text = text.strip()
+    for pattern in (_RE_ARABIC, _RE_ROMAN, _RE_LETTER):
+        m = pattern.match(text)
+        if m:
+            return m.group(2).strip()
+    return text
 
 
 def _strip_numbering(text: str) -> str:

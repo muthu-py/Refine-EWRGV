@@ -5,6 +5,7 @@ Repository for persisting collected papers to Supabase PostgreSQL.
 """
 
 import json
+from typing import Optional
 from asyncpg import Pool
 from app.core.logging import get_logger
 from app.domain.models.collection import CollectionResult
@@ -18,18 +19,39 @@ class PaperRepository:
     def __init__(self, db_pool: Pool):
         self._pool = db_pool
 
-    async def save_collection_result(self, result: CollectionResult, research_question: str) -> None:
+    async def list_runs(self, limit: int = 30) -> list[dict]:
+        """Return the most recently updated research runs with paper counts."""
+        query = """
+            SELECT r.run_id::text AS run_id, r.research_question, r.query_id::text AS query_id,
+                   r.created_at, COUNT(DISTINCT ps.paper_id)::int AS paper_count
+            FROM research_runs r
+            LEFT JOIN paper_sources ps ON ps.run_id = r.run_id
+            GROUP BY r.run_id
+            ORDER BY r.created_at DESC
+            LIMIT $1
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, limit)
+        return [dict(row) for row in rows]
+
+    async def save_collection_result(
+        self,
+        result: CollectionResult,
+        research_question: str,
+        query_id: Optional[str] = None,
+    ) -> None:
         """
         Persists a CollectionResult into `research_runs`, `papers`, and `paper_sources` tables.
         Uses an upsert strategy for `papers` based on DOI if present.
-        """
-        if not result.papers:
-            return
 
+        The research_runs row is written even when nothing was found, so the
+        returned run_id is always valid.  ``query_id`` links the run to its
+        stored /query result (query_runs).
+        """
         query_runs = """
-            INSERT INTO research_runs (run_id, research_question)
-            VALUES ($1, $2)
-            ON CONFLICT (run_id) DO NOTHING
+            INSERT INTO research_runs (run_id, research_question, query_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (run_id) DO UPDATE SET query_id = COALESCE(EXCLUDED.query_id, research_runs.query_id)
         """
 
         query_papers = """
@@ -56,7 +78,7 @@ class PaperRepository:
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 # Persist the research run record
-                await conn.execute(query_runs, result.query_id, research_question)
+                await conn.execute(query_runs, result.query_id, research_question, query_id)
 
                 for cp in result.papers:
                     paper = cp.paper
@@ -135,6 +157,47 @@ class PaperRepository:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, run_id)
             return [dict(r) for r in rows]
+
+    async def list_run_papers(
+        self, run_id: str, limit: int = 50, offset: int = 0,
+        search: str | None = None, sort_by: str = "downloaded"
+    ) -> tuple[list[dict], int]:
+        """Return paginated paper metadata and processing state for a run."""
+        order_by = {
+            "downloaded": "download_priority, p.publication_year DESC NULLS LAST, p.title ASC",
+            "year_desc": "p.publication_year DESC NULLS LAST, p.title ASC",
+            "year_asc": "p.publication_year ASC NULLS LAST, p.title ASC",
+            "title_asc": "p.title ASC",
+            "title_desc": "p.title DESC",
+        }.get(sort_by, "download_priority, p.publication_year DESC NULLS LAST, p.title ASC")
+        condition = "AND ($4::text IS NULL OR p.title ILIKE '%' || $4 || '%' OR COALESCE(p.doi, '') ILIKE '%' || $4 || '%' OR COALESCE(p.abstract, '') ILIKE '%' || $4 || '%')"
+        async with self._pool.acquire() as conn:
+            count = await conn.fetchval(
+                """SELECT COUNT(DISTINCT p.paper_id) FROM papers p
+                   JOIN paper_sources ps ON ps.paper_id = p.paper_id
+                   WHERE ps.run_id = $1
+                     AND ($2::text IS NULL OR p.title ILIKE '%' || $2 || '%'
+                          OR COALESCE(p.doi, '') ILIKE '%' || $2 || '%'
+                          OR COALESCE(p.abstract, '') ILIKE '%' || $2 || '%')""",
+                run_id, search or None,
+            )
+            rows = await conn.fetch(
+                """SELECT DISTINCT p.paper_id::text AS paper_id,
+                          CASE WHEN p.full_text_status = 'DOWNLOADED' THEN 0 ELSE 1 END AS download_priority,
+                          p.title, p.abstract, p.doi,
+                          p.publication_year, p.authors, p.full_text_url, p.source_type,
+                          p.full_text_status, p.parsing_status, p.section_status,
+                          p.chunk_status, p.embedding_status
+                   FROM papers p
+                   JOIN paper_sources ps ON ps.paper_id = p.paper_id
+                   WHERE ps.run_id = $1 """ + condition +
+                f" ORDER BY {order_by} LIMIT $2 OFFSET $3",
+                run_id, limit, offset, search or None,
+            )
+        papers = [dict(row) for row in rows]
+        for paper in papers:
+            paper.pop("download_priority", None)
+        return papers, int(count or 0)
 
     async def run_exists(self, run_id: str) -> bool:
         """Returns True if a research_runs row exists for run_id."""
@@ -409,6 +472,29 @@ class PaperRepository:
         """
         async with self._pool.acquire() as conn:
             await conn.execute(query, status, paper_id)
+
+    async def get_papers_for_corpus(self, run_id: str) -> list[dict]:
+        """
+        Fetches the chunked papers of a run with the bibliographic fields
+        needed by retrieval and gap detection (title, year, DOI, authors).
+        """
+        query = """
+            SELECT DISTINCT
+                p.paper_id,
+                p.title,
+                p.abstract,
+                p.doi,
+                p.publication_year,
+                p.authors,
+                p.chunks_storage_path
+            FROM papers p
+            JOIN paper_sources ps ON ps.paper_id = p.paper_id
+            WHERE ps.run_id = $1
+              AND p.chunk_status = 'CHUNKED'
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, run_id)
+            return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------ #
     # Phase 2.8 — Corpus Health & Consistency

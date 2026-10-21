@@ -70,16 +70,20 @@ class Settings(BaseSettings):
     EMBEDDING_PROVIDER: str = "openai"    # e.g. "openai", "sentence-transformers"
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_API_KEY: str = Field(default="", repr=False)
+    EMBEDDING_BASE_URL: str | None = None  # OpenAI-compatible endpoint; defaults per provider (see embeddings factory)
     EMBEDDING_DIMENSION: int = 1536
     EMBEDDING_BATCH_SIZE: int = 32        # chunks per API request
     EMBEDDING_TIMEOUT: int = 60           # HTTP request timeout in seconds
-    EMBEDDING_RETRY_COUNT: int = 3        # max retries on transient failures
+    EMBEDDING_RETRY_COUNT: int = 5        # max retries on transient failures (429 / 5xx / network)
     EMBEDDING_RETRY_DELAY: float = 1.0    # base delay in seconds between retries
+    EMBEDDING_MAX_BACKOFF: float = 60.0   # cap (seconds) on any single retry wait, incl. Retry-After
 
     # ------------------------------------------------------------------ #
     # BM25 (Phase 2.9)
     # ------------------------------------------------------------------ #
     BM25_INDEX_PATH: str = "data/artifacts/bm25"
+    RETRIEVAL_MAX_PER_PAPER: int = 3      # cap hits per paper in a result list (0 = no cap)
+    RETRIEVAL_CORPUS_CACHE_TTL: int = 900 # seconds a loaded run corpus is reused (0 = no cache)
 
     # ------------------------------------------------------------------ #
     # Vector Store
@@ -120,6 +124,12 @@ class Settings(BaseSettings):
     # Overall collection limits
     LITERATURE_REQUEST_TIMEOUT: int = 30    # HTTP timeout in seconds
     LITERATURE_MAX_TOTAL_RESULTS: int = 200  # hard cap across all queries + providers
+    LITERATURE_MAX_QUERIES: int = 4         # original query plus at most three expansions
+    LITERATURE_MAX_RETRIES: int = 2
+    LITERATURE_RETRY_BASE_DELAY: float = 2.0
+    LITERATURE_MAX_RETRY_DELAY: float = 60.0
+    LITERATURE_MIN_REQUEST_INTERVAL: float = 1.0
+    LITERATURE_SEARCH_CACHE_TTL: int = 900
 
     # ------------------------------------------------------------------ #
     # Chunking (Phase 2.7)
@@ -130,6 +140,7 @@ class Settings(BaseSettings):
     CHUNK_MAX_SIZE: int = 600       # hard upper bound tokens per chunk
     CHUNK_OVERLAP: int = 75         # overlap tokens between consecutive chunks
     CHUNK_MIN_SIZE: int = 20        # minimum tokens to emit a chunk
+    CHUNK_MIN_WORDS: int = 60       # fold smaller sections / trailing chunks into neighbours (0 = off)
 
     # ------------------------------------------------------------------ #
     # Retrieval
@@ -137,7 +148,13 @@ class Settings(BaseSettings):
     TOP_K: int = 20
     BM25_K: int = 20
     SEMANTIC_K: int = 20
-    RERANK_TOP_N: int = 10
+    RERANK_TOP_N: int = Field(default=50, ge=1, le=500)
+    RERANK_ENABLED: bool = True
+    RERANK_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    RERANK_DEVICE: str = "cpu"
+    RERANK_BATCH_SIZE: int = Field(default=16, ge=1, le=256)
+    RERANK_MAX_CANDIDATES: int = Field(default=50, ge=1, le=500)
+    RERANK_FAIL_OPEN: bool = False
 
     # ------------------------------------------------------------------ #
     # Gap Detection

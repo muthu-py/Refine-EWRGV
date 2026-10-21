@@ -32,7 +32,9 @@ Explicitly NOT used:
 - Microservices
 - Message brokers / event queues
 - Distributed processing
-- Knowledge graphs / GNN / GraphRAG
+- Graph databases (Neo4j), GNN training, GraphRAG infrastructure. A per-run knowledge graph *is* used
+  (in-process NetworkX, persisted as JSONB in Postgres): see
+  `docs/methodology/HYBRID_KG_GAP_METHODOLOGY.md` and `app/knowledge_graph/`
 - Fine-tuning
 
 ---
@@ -88,7 +90,7 @@ Infrastructure Implementations   (app/providers/, app/storage/)
 
 ### `app/domain/`
 - `enums.py` — `GapType`, `EvidenceType`, `GapClassification`, `PipelineStage`, `QueryType`
-- `models/` — Pydantic domain models: `Paper`, `DocumentChunk`, `ResearchQuery`, `CandidateGap`, `Evidence`, `ValidationResult`, `CoverageAssessment`
+- `models/` — Pydantic domain models: `Paper`, `PaperChunk`, `ResearchQuery`, `CandidateGap`, `Evidence`, `ValidationResult`, `CoverageAssessment`
 - `interfaces.py` — All `Protocol` and `ABC` interfaces
 
 ### `app/ingestion/`
@@ -146,11 +148,11 @@ ResearchQuery
       ↓
 [Literature Collection] ──→ Paper[]
       ↓
-[Document Parsing + Chunking] ──→ DocumentChunk[]
+[Document Parsing + Chunking] ──→ PaperChunk[]
       ↓
-[Hybrid Retrieval: Semantic + BM25 + RRF] ──→ DocumentChunk[]
+[Hybrid Retrieval: Semantic + BM25 + RRF] ──→ PaperChunk[]
       ↓
-[Reranking] ──→ DocumentChunk[] (top-n)
+[Reranking] ──→ PaperChunk[] (top-n)
       ↓
 [Gap Detection] ──→ CandidateGap[] (unvalidated)
       ↓

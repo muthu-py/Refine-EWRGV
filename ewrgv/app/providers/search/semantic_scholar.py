@@ -68,6 +68,11 @@ class SemanticScholarCollector:
         api_key: str = "",
         base_url: str = "https://api.semanticscholar.org/graph/v1",
         timeout: int = 30,
+        max_retries: int = 2,
+        retry_base_delay: float = 2.0,
+        min_request_interval: float = 1.0,
+        max_retry_delay: float = 60.0,
+        cache_ttl: int = 900,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url
@@ -81,6 +86,11 @@ class SemanticScholarCollector:
             base_url=base_url,
             timeout=timeout,
             default_headers=headers,
+            max_retries=max_retries,
+            retry_base_delay=retry_base_delay,
+            min_request_interval=min_request_interval,
+            max_retry_delay=max_retry_delay,
+            cache_ttl=cache_ttl,
         )
 
     # ------------------------------------------------------------------ #
